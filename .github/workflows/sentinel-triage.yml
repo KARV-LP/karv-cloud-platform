@@ -45,35 +45,11 @@ jobs:
           github-token: ${{ github.token }}
           script: |
             const fs = require('node:fs');
+            const { buildIssueBody } = require('./.github/scripts/sentinel-issue.cjs');
             const decision = JSON.parse(
               fs.readFileSync(process.env.SENTINEL_DECISION_PATH, 'utf8')
             );
-            const body = [
-              '## KARV Sentinel',
-              '',
-              `**Prioridade:** ${decision.priority}`,
-              `**Categoria:** ${decision.category}`,
-              `**Confiança:** ${decision.confidence}`,
-              `**Modo:** ${decision.remediation.mode}`,
-              '',
-              '## Diagnóstico',
-              '',
-              decision.summary,
-              '',
-              '## Evidências observadas',
-              '',
-              ...decision.observedEvidence.map((item) => `- ${item}`),
-              '',
-              '## Ação recomendada',
-              '',
-              decision.recommendedAction,
-              '',
-              '## Bloqueios de política',
-              '',
-              ...(decision.policy.blockingReasons.length
-                ? decision.policy.blockingReasons.map((item) => `- ${item}`)
-                : ['- Nenhum; uma PR draft pode ser preparada após acionamento humano.'])
-            ].join('\n');
+            const body = buildIssueBody(decision);
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
