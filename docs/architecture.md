@@ -2,7 +2,14 @@
 
 ## Escopo
 
-Este repositório centraliza somente infraestrutura compartilhada. Os repositórios `personalize` e `3D` continuam independentes.
+Este repositório centraliza somente infraestrutura compartilhada. `karv-lps`, `KV_COLLAB_BLING` e `3D` continuam independentes.
+
+## Repositórios KARV
+
+- `karv-lps`: landing pages e sites.
+- `KV_COLLAB_BLING`: integração e colaboração com Bling.
+- `3D`: experiência e recursos 3D.
+- `karv-cloud-platform`: APIs, segurança e conectividade compartilhada com IA.
 
 ## Fluxo
 
@@ -30,4 +37,3 @@ Este repositório centraliza somente infraestrutura compartilhada. Os repositór
 - Configurar WAF e Turnstile para qualquer futura rota pública.
 - Manter `AI_API_ENABLED=false` até testes e aprovação.
 - Validar que logs não contenham prompts ou dados pessoais.
-
