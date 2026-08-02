@@ -1,0 +1,7 @@
+# Copie este arquivo para .dev.vars apenas no ambiente local.
+# Nunca envie .dev.vars ou qualquer chave para o GitHub.
+OPENAI_API_KEY=""
+ANTHROPIC_API_KEY=""
+KARV_INTERNAL_API_TOKEN=""
+AI_GATEWAY_TOKEN=""
+

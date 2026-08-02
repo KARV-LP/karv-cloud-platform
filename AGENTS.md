@@ -1,0 +1,12 @@
+# KARV Cloud Platform
+
+## Regras permanentes
+
+- Nunca grave chaves, tokens ou credenciais em arquivos versionados.
+- Use `.dev.vars` somente para desenvolvimento local e Cloudflare Secrets para produção.
+- Trabalhe em branch `agent/*` e abra PR draft; não altere `main` diretamente.
+- Não execute deploy de produção sem aprovação explícita da direção KARV.
+- Mantenha `personalize` e `3D` como repositórios independentes.
+- APIs de IA devem exigir autenticação, limitar entrada e nunca registrar prompts ou dados pessoais em logs.
+- Execute `npm run check` antes de publicar qualquer branch.
+
