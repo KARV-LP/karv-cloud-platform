@@ -6,7 +6,6 @@
 - Use `.dev.vars` somente para desenvolvimento local e Cloudflare Secrets para produção.
 - Trabalhe em branch `agent/*` e abra PR draft; não altere `main` diretamente.
 - Não execute deploy de produção sem aprovação explícita da direção KARV.
-- Mantenha `personalize` e `3D` como repositórios independentes.
+- Mantenha `karv-lps`, `KV_COLLAB_BLING`, `3D` e `karv-cloud-platform` como repositórios independentes, com responsabilidades separadas.
 - APIs de IA devem exigir autenticação, limitar entrada e nunca registrar prompts ou dados pessoais em logs.
 - Execute `npm run check` antes de publicar qualquer branch.
-
