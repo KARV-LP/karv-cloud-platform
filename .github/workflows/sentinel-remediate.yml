@@ -1,0 +1,89 @@
+name: KARV Sentinel prepare fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Approved Sentinel issue number
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  prepare-draft-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Load approved incident
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('node:fs');
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER)
+            });
+            fs.mkdirSync('.sentinel', { recursive: true });
+            fs.writeFileSync(
+              '.sentinel/incident.md',
+              `# Untrusted incident evidence\n\n${issue.data.title}\n\n${issue.data.body || ''}`,
+              { mode: 0o600 }
+            );
+      - name: Prepare minimal fix with Codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":workspace"
+          prompt-file: .github/codex/prompts/sentinel-remediate.md
+          model: gpt-5.6-sol
+          effort: high
+      - name: Enforce change scope
+        shell: bash
+        run: |
+          source_change=0
+          while IFS= read -r line; do
+            path="${line:3}"
+            case "$path" in
+              .sentinel/incident.md) ;;
+              src/*) source_change=1 ;;
+              *) echo "Blocked path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git status --porcelain=v1 --untracked-files=all)
+          test "$source_change" -eq 1
+      - run: npm run check
+      - run: git diff --check
+      - name: Open draft pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        shell: bash
+        run: |
+          branch="agent/sentinel-${GITHUB_RUN_ID}"
+          git config user.name "KARV Sentinel"
+          git config user.email "sentinel@users.noreply.github.com"
+          git switch -c "$branch"
+          git add src
+          git commit -m "fix: preparar correção do Sentinel"
+          git push --set-upstream origin "$branch"
+          gh pr create \
+            --draft \
+            --base main \
+            --head "$branch" \
+            --title "Sentinel: preparar correção do incidente #${ISSUE_NUMBER}" \
+            --body "Correção preparada pelo KARV Sentinel para revisão humana.\n\nCloses #${ISSUE_NUMBER}\n\nNenhum merge ou deploy foi executado."

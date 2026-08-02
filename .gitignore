@@ -1,0 +1,9 @@
+.dev.vars*
+!.dev.vars.example
+.env*
+node_modules/
+.wrangler/
+dist/
+coverage/
+.sentinel/
+monitoring-agent/sentinel-decision.json
