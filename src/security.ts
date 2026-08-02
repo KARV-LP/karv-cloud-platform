@@ -38,11 +38,27 @@ export function corsHeaders(request: Request, env: Env): HeadersInit {
   if (!allowed.includes(origin)) return {};
 
   return {
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-KARV-Project",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Origin": origin,
     Vary: "Origin"
   };
+}
+
+export function resolveKarvProject(request: Request, env: Env): string {
+  const project =
+    request.headers.get("X-KARV-Project")?.trim() || env.KARV_DEFAULT_PROJECT;
+  const allowed = new Set(
+    env.KARV_PROJECTS.split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+
+  if (!project || !allowed.has(project)) {
+    throw new HttpError(400, "Unknown KARV project");
+  }
+
+  return project;
 }
 
 export async function requireInternalAuth(
@@ -127,4 +143,3 @@ async function constantTimeEqual(left: string, right: string): Promise<boolean> 
   }
   return difference === 0 && left.length === right.length;
 }
-

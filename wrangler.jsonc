@@ -6,16 +6,35 @@
   "compatibility_flags": ["nodejs_compat"],
   "preview_urls": true,
   "workers_dev": true,
+  "analytics_engine_datasets": [
+    {
+      "binding": "KARV_ANALYTICS",
+      "dataset": "karv_platform_metrics"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 12 * * MON", "0 12 1 * *"]
+  },
   "vars": {
     "AI_API_ENABLED": "false",
     "AI_GATEWAY_BASE_URL": "",
     "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com,https://personalize.k-arv.com",
+    "KARV_DEFAULT_PROJECT": "karv-lps",
+    "KARV_PROJECTS": "karv-lps,KV_COLLAB_BLING,3D",
     "OPENAI_MODEL": "gpt-5.6-terra",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-5"
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+    "REPORT_DELIVERY_ENABLED": "false",
+    "REPORTING_API_ENABLED": "false"
   },
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 0.1
+    "logs": {
+      "invocation_logs": true,
+      "head_sampling_rate": 0.1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
   }
 }
-

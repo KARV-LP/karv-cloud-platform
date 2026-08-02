@@ -11,8 +11,13 @@ export class ProviderError extends Error {
 }
 
 export function gatewayHeaders(env: Env): HeadersInit {
-  if (!env.AI_GATEWAY_TOKEN) return {};
-  return { "cf-aig-authorization": `Bearer ${env.AI_GATEWAY_TOKEN}` };
+  const headers: Record<string, string> = {
+    "cf-aig-collect-log-payload": "false"
+  };
+  if (env.AI_GATEWAY_TOKEN) {
+    headers["cf-aig-authorization"] = `Bearer ${env.AI_GATEWAY_TOKEN}`;
+  }
+  return headers;
 }
 
 export function gatewayUrl(env: Env, providerPath: string): string {
@@ -20,4 +25,3 @@ export function gatewayUrl(env: Env, providerPath: string): string {
   if (!base) throw new Error("AI_GATEWAY_BASE_URL is not configured");
   return `${base}/${providerPath}`;
 }
-

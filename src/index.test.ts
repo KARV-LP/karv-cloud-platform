@@ -7,7 +7,11 @@ const baseEnv: Env = {
   AI_GATEWAY_BASE_URL: "https://gateway.ai.cloudflare.com/v1/account/gateway",
   ALLOWED_ORIGINS: "https://personalize.k-arv.com",
   ANTHROPIC_MODEL: "claude-sonnet-4-5",
-  OPENAI_MODEL: "gpt-5.6-terra"
+  KARV_DEFAULT_PROJECT: "karv-lps",
+  KARV_PROJECTS: "karv-lps,KV_COLLAB_BLING,3D",
+  OPENAI_MODEL: "gpt-5.6-terra",
+  REPORT_DELIVERY_ENABLED: "false",
+  REPORTING_API_ENABLED: "false"
 };
 
 afterEach(() => vi.restoreAllMocks());
@@ -79,6 +83,81 @@ describe("KARV Cloud Platform worker", () => {
       model: "gpt-5.6-terra",
       store: false
     });
+    expect(new Headers(init?.headers).get("cf-aig-collect-log-payload")).toBe(
+      "false"
+    );
+  });
+
+  it("records only safe AI metadata by project", async () => {
+    const writeDataPoint = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ output_text: "Resumo seguro" })
+    );
+
+    const response = await postAi(
+      {
+        ...baseEnv,
+        AI_API_ENABLED: "true",
+        KARV_ANALYTICS: { writeDataPoint },
+        KARV_INTERNAL_API_TOKEN: "secret",
+        OPENAI_API_KEY: "test-key"
+      },
+      {
+        Authorization: "Bearer secret",
+        "X-KARV-Project": "3D"
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(writeDataPoint).toHaveBeenCalledOnce();
+    const point = writeDataPoint.mock.calls[0]?.[0];
+    expect(point.blobs).toEqual([
+      "ai_request",
+      "3D",
+      "openai",
+      "catalog_summary",
+      "gpt-5.6-terra",
+      "success",
+      "200"
+    ]);
+    expect(JSON.stringify(point)).not.toContain("Coleção de teste");
+  });
+
+  it("keeps the reporting endpoint disabled by default", async () => {
+    const response = await worker.fetch(
+      new Request("https://api.k-arv.com/api/internal/reports/summary") ,
+      baseEnv
+    );
+    expect(response.status).toBe(503);
+  });
+
+  it("returns an authenticated seven-day report", async () => {
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ data: [{ project: "karv-lps", requests: 2 }] })
+    );
+
+    const response = await worker.fetch(
+      new Request(
+        "https://api.k-arv.com/api/internal/reports/summary?period=7d",
+        { headers: { Authorization: "Bearer secret" } }
+      ),
+      {
+        ...baseEnv,
+        CLOUDFLARE_ACCOUNT_ID: "account",
+        CLOUDFLARE_ANALYTICS_TOKEN: "analytics-token",
+        KARV_INTERNAL_API_TOKEN: "secret",
+        REPORTING_API_ENABLED: "true"
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      period: "7d",
+      rows: [{ project: "karv-lps", requests: 2 }]
+    });
+    expect(String(upstream.mock.calls[0]?.[1]?.body)).toContain(
+      "INTERVAL '7' DAY"
+    );
   });
 });
 
@@ -96,4 +175,3 @@ function postAi(env: Env, headers: HeadersInit = {}): Promise<Response> {
     env
   );
 }
-

@@ -24,6 +24,8 @@ Este repositório centraliza somente infraestrutura compartilhada. `karv-lps`, `
 - Cloudflare Edge: TLS, DDoS, WAF e regras de tráfego.
 - Worker: autenticação, validação e roteamento.
 - AI Gateway: custo, rate limit, métricas e fallback futuro.
+- Analytics Engine: métricas agregadas por projeto sem prompts ou dados pessoais.
+- Workers Observability: erros, latência, traces amostrados e execuções agendadas.
 - OpenAI/Anthropic: inferência.
 - R2 futuro: apenas GLB web, texturas web e catálogo público.
 - Arquivos industriais e masters: fora da infraestrutura pública.
@@ -37,3 +39,5 @@ Este repositório centraliza somente infraestrutura compartilhada. `karv-lps`, `
 - Configurar WAF e Turnstile para qualquer futura rota pública.
 - Manter `AI_API_ENABLED=false` até testes e aprovação.
 - Validar que logs não contenham prompts ou dados pessoais.
+- Configurar o token analítico de leitura e validar os relatórios de 7 e 30 dias.
+- Aprovar o destino antes de habilitar a entrega semanal ou mensal.

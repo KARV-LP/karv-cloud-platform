@@ -22,8 +22,16 @@ export interface Env {
   ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_MODEL: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_ANALYTICS_TOKEN?: string;
+  KARV_ANALYTICS?: AnalyticsEngineDataset;
+  KARV_DEFAULT_PROJECT: string;
   KARV_INTERNAL_API_TOKEN?: string;
+  KARV_PROJECTS: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL: string;
+  REPORT_DELIVERY_ENABLED: string;
+  REPORT_WEBHOOK_TOKEN?: string;
+  REPORT_WEBHOOK_URL?: string;
+  REPORTING_API_ENABLED: string;
 }
-
