@@ -11,6 +11,5 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "vitest.config.ts"]
+  "include": ["worker-configuration.d.ts", "src/**/*.ts", "vitest.config.ts"]
 }
-
