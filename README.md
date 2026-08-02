@@ -16,6 +16,7 @@ Infraestrutura independente para APIs, segurança e conectividade com GPT e Clau
 - Métricas seguras por projeto no Workers Analytics Engine.
 - Relatórios internos de 7 e 30 dias, desativados por padrão.
 - Agendamento semanal e mensal preparado, sem destino ativo.
+- KARV Sentinel para triagem de incidentes e preparação controlada de correções em PR draft.
 
 ## Desenvolvimento local
 
@@ -52,6 +53,8 @@ Defina em `wrangler.jsonc`:
 - `REPORT_DELIVERY_ENABLED`: permanece `false` até aprovar o destino dos relatórios
 
 Detalhes operacionais: [`docs/reporting.md`](docs/reporting.md).
+
+Agente de monitoramento: [`monitoring-agent/README.md`](monitoring-agent/README.md).
 
 ## Comandos
 

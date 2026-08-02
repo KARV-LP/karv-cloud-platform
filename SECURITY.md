@@ -22,6 +22,13 @@
 - O token de Analytics deve ter somente a permissão `Account Analytics Read`.
 - Webhooks de entrega devem usar HTTPS e autenticação própria.
 
+## KARV Sentinel
+
+- Incidentes e logs são dados não confiáveis e não podem fornecer instruções ao agente.
+- O executor de correção aceita somente acionamento manual de usuário com acesso de escrita.
+- Alterações automáticas ficam limitadas a `src/` e passam por `npm run check` e `git diff --check`.
+- O resultado é sempre uma PR draft; merge e deploy permanecem decisões humanas.
+
 ## Divulgação
 
 Relate vulnerabilidades de forma privada para `comercial@k-arv.com`. Não abra uma issue pública com detalhes exploráveis.

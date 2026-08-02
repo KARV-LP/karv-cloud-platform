@@ -26,6 +26,8 @@ Este repositório centraliza somente infraestrutura compartilhada. `karv-lps`, `
 - AI Gateway: custo, rate limit, métricas e fallback futuro.
 - Analytics Engine: métricas agregadas por projeto sem prompts ou dados pessoais.
 - Workers Observability: erros, latência, traces amostrados e execuções agendadas.
+- KARV Sentinel: classificação de incidentes e proposta estruturada de correção.
+- Codex Action: preparação isolada da correção, limitada a PR draft após acionamento humano.
 - OpenAI/Anthropic: inferência.
 - R2 futuro: apenas GLB web, texturas web e catálogo público.
 - Arquivos industriais e masters: fora da infraestrutura pública.

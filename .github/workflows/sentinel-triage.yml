@@ -1,0 +1,82 @@
+name: KARV Sentinel triage
+
+on:
+  workflow_dispatch:
+    inputs:
+      incident_json:
+        description: Incident JSON from a trusted KARV operator
+        required: true
+        type: string
+  repository_dispatch:
+    types:
+      - karv-incident
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      INCIDENT_JSON: ${{ github.event_name == 'repository_dispatch' && toJSON(github.event.client_payload.incident) || inputs.incident_json }}
+      MONITOR_AGENT_MODEL: gpt-5.6-terra
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      SENTINEL_OUTPUT: sentinel-decision.json
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: monitoring-agent/package-lock.json
+      - run: npm ci
+        working-directory: monitoring-agent
+      - run: npm run analyze
+        working-directory: monitoring-agent
+      - name: Create a reviewable incident issue
+        uses: actions/github-script@v7
+        env:
+          SENTINEL_DECISION_PATH: monitoring-agent/sentinel-decision.json
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('node:fs');
+            const decision = JSON.parse(
+              fs.readFileSync(process.env.SENTINEL_DECISION_PATH, 'utf8')
+            );
+            const body = [
+              '## KARV Sentinel',
+              '',
+              `**Prioridade:** ${decision.priority}`,
+              `**Categoria:** ${decision.category}`,
+              `**Confiança:** ${decision.confidence}`,
+              `**Modo:** ${decision.remediation.mode}`,
+              '',
+              '## Diagnóstico',
+              '',
+              decision.summary,
+              '',
+              '## Evidências observadas',
+              '',
+              ...decision.observedEvidence.map((item) => `- ${item}`),
+              '',
+              '## Ação recomendada',
+              '',
+              decision.recommendedAction,
+              '',
+              '## Bloqueios de política',
+              '',
+              ...(decision.policy.blockingReasons.length
+                ? decision.policy.blockingReasons.map((item) => `- ${item}`)
+                : ['- Nenhum; uma PR draft pode ser preparada após acionamento humano.'])
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Sentinel ${decision.priority}] ${decision.summary.slice(0, 100)}`,
+              body
+            });
