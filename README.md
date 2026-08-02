@@ -59,9 +59,12 @@ Agente de monitoramento: [`monitoring-agent/README.md`](monitoring-agent/README.
 ## Comandos
 
 ```bash
+npm run types:generate
 npm run typecheck
 npm test
 npm run check
+npm run dry-run:staging
+npm run dry-run:production
 ```
 
-O comando `npm run deploy` existe para operação manual, mas não deve ser executado sem aprovação explícita da direção KARV.
+Os comandos de deploy são separados por ambiente: `npm run deploy:staging` e `npm run deploy:production`. Nenhum deles deve ser executado sem aprovação explícita da direção KARV.

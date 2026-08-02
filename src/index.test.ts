@@ -3,12 +3,15 @@ import worker from "./index";
 import type { Env } from "./types";
 
 const baseEnv: Env = {
+  KARV_ANALYTICS: {
+    writeDataPoint: () => undefined
+  },
   AI_API_ENABLED: "false",
   AI_GATEWAY_BASE_URL: "https://gateway.ai.cloudflare.com/v1/account/gateway",
-  ALLOWED_ORIGINS: "https://personalize.k-arv.com",
+  ALLOWED_ORIGINS: "https://www.k-arv.com",
   ANTHROPIC_MODEL: "claude-sonnet-4-5",
   KARV_DEFAULT_PROJECT: "karv-lps",
-  KARV_PROJECTS: "karv-lps,KV_COLLAB_BLING,3D",
+  KARV_PROJECTS: "karv-lps,KV_COLLAB_BLING,3D,karv-cloud-platform",
   OPENAI_MODEL: "gpt-5.6-terra",
   REPORT_DELIVERY_ENABLED: "false",
   REPORTING_API_ENABLED: "false"
