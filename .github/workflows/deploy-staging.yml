@@ -38,6 +38,7 @@ jobs:
 
       - run: npm ci
       - run: npm run check
+      - run: npm ci --prefix monitoring-agent
       - run: npm run check --prefix monitoring-agent
       - run: npm run dry-run:staging
 
