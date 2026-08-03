@@ -10,7 +10,10 @@ import {
   corsHeaders,
   HttpError,
   parseAiRequest,
+  requireAiRateLimit,
+  requireAllowedBrowserOrigin,
   requireInternalAuth,
+  requireProjectPolicy,
   resolveKarvProject,
   securityHeaders
 } from "./security";
@@ -34,10 +37,18 @@ export default {
       (url.pathname === "/api/internal/ai" ||
         url.pathname === "/api/internal/reports/summary")
     ) {
-      return new Response(null, {
-        status: 204,
-        headers: { ...securityHeaders(), ...corsHeaders(request, env) }
-      });
+      try {
+        requireAllowedBrowserOrigin(request, env);
+        return new Response(null, {
+          status: 204,
+          headers: { ...securityHeaders(), ...corsHeaders(request, env) }
+        });
+      } catch (error) {
+        if (error instanceof HttpError) {
+          return json({ error: error.message, requestId }, error.status);
+        }
+        return json({ error: "Internal server error", requestId }, 500);
+      }
     }
 
     if (
@@ -45,6 +56,7 @@ export default {
       url.pathname === "/api/internal/reports/summary"
     ) {
       try {
+        requireAllowedBrowserOrigin(request, env);
         if (env.REPORTING_API_ENABLED !== "true") {
           throw new HttpError(503, "Reporting API is disabled");
         }
@@ -71,6 +83,7 @@ export default {
       let model = "unknown";
 
       try {
+        requireAllowedBrowserOrigin(request, env);
         if (env.AI_API_ENABLED !== "true") {
           throw new HttpError(503, "AI API is disabled");
         }
@@ -80,6 +93,8 @@ export default {
         const aiRequest = await parseAiRequest(request);
         provider = aiRequest.provider;
         task = aiRequest.task;
+        requireProjectPolicy(project, aiRequest, env);
+        await requireAiRateLimit(env, project, task);
         model = provider === "openai" ? env.OPENAI_MODEL : env.ANTHROPIC_MODEL;
         const result: AiResult =
           provider === "openai"
