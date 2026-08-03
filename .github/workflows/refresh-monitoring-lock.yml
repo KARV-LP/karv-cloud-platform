@@ -1,0 +1,38 @@
+name: Refresh Monitoring Agent lock
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-lock:
+    if: github.head_ref == 'agent/fix-stage2-runtime-review' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: monitoring-agent/package-lock.json
+      - name: Regenerate Monitoring Agent lockfile
+        run: npm install --package-lock-only --ignore-scripts --prefix monitoring-agent
+      - name: Commit regenerated lockfile
+        shell: bash
+        run: |
+          if git diff --quiet -- monitoring-agent/package-lock.json; then
+            echo "monitoring-agent/package-lock.json already synchronized"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add monitoring-agent/package-lock.json
+          git commit -m "Atualiza lockfile do Monitoring Agent [skip ci]"
+          git push origin HEAD:${{ github.head_ref }}
