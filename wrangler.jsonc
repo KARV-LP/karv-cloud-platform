@@ -52,7 +52,7 @@
       },
       "vars": {
         "AI_API_ENABLED": "false",
-        "AI_GATEWAY_BASE_URL": "",
+        "AI_GATEWAY_BASE_URL": "https://gateway.ai.cloudflare.com/v1/d229397cfd525e985402adc042591d02/karv-ai-gateway-staging",
         "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com",
         "KARV_DEFAULT_PROJECT": "karv-lps",
         "KARV_PROJECTS": "karv-lps,KV_COLLAB_BLING,3D,karv-cloud-platform",
