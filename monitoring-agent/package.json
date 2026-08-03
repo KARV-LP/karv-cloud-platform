@@ -19,6 +19,9 @@
     "typescript": "7.0.2",
     "vitest": "4.1.10"
   },
+  "overrides": {
+    "hono": "4.12.34"
+  },
   "engines": {
     "node": ">=22"
   }
