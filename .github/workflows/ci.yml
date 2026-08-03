@@ -22,6 +22,7 @@ jobs:
       - run: npm ci
       - run: npm run audit:security
       - run: npm run check
+      - run: npm run dry-run:staging
 
   validate-sentinel:
     runs-on: ubuntu-latest
