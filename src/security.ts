@@ -184,9 +184,14 @@ function allowedOrigins(env: Env): Set<string> {
 }
 
 function projectPolicies(env: Env): Map<string, ProjectPolicy> {
+  const serialized = env.KARV_PROJECT_POLICIES;
+  if (!serialized) {
+    throw new HttpError(503, "Project security policy is not configured");
+  }
+
   let value: unknown;
   try {
-    value = JSON.parse(env.KARV_PROJECT_POLICIES);
+    value = JSON.parse(serialized);
   } catch {
     throw new HttpError(503, "Project security policy is invalid");
   }
