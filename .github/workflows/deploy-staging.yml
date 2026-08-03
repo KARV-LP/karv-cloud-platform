@@ -43,9 +43,15 @@ jobs:
       - run: npm run dry-run:staging
 
       - name: Deploy the disabled-by-default staging Worker
+        id: deploy
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy --env staging
           wranglerVersion: "4.118.0"
+
+      - name: Run automated staging smoke tests
+        env:
+          SMOKE_BASE_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: npm run test:smoke
