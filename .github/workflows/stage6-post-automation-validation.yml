@@ -1,0 +1,51 @@
+name: Stage 6 - Post-automation staging validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/stage6-post-automation-validation.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage6-post-automation-staging-validation
+  cancel-in-progress: false
+
+jobs:
+  deploy-and-smoke:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    environment: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm ci --prefix monitoring-agent
+      - run: npm run check --prefix monitoring-agent
+      - run: npm run dry-run:staging
+
+      - name: Deploy the disabled-by-default staging Worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --env staging
+          wranglerVersion: "4.118.0"
+
+      - name: Run automated staging smoke tests
+        env:
+          SMOKE_BASE_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: npm run test:smoke
