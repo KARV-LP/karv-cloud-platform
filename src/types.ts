@@ -15,15 +15,26 @@ export interface AiResult {
   requestId: string;
 }
 
+export interface RateLimitBinding {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+
 interface SecretBindings {
   AI_GATEWAY_TOKEN?: string;
   ANTHROPIC_API_KEY?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_ANALYTICS_TOKEN?: string;
   KARV_INTERNAL_API_TOKEN?: string;
+  KARV_INTERNAL_API_TOKEN_NEXT?: string;
   OPENAI_API_KEY?: string;
   REPORT_WEBHOOK_TOKEN?: string;
   REPORT_WEBHOOK_URL?: string;
 }
 
-export type Env = CloudflareBindings & SecretBindings;
+interface SecurityBindings {
+  AI_RATE_LIMITER?: RateLimitBinding;
+}
+
+export type Env = Omit<CloudflareBindings, "AI_RATE_LIMITER"> &
+  SecurityBindings &
+  SecretBindings;
