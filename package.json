@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:smoke": "node scripts/smoke-test.mjs",
+    "audit:security": "npm audit --audit-level=high",
     "check": "npm run types:check && npm run typecheck && npm run test",
     "dry-run:staging": "wrangler deploy --env staging --dry-run --outdir dist/staging",
     "dry-run:production": "wrangler deploy --env production --dry-run --outdir dist/production",
