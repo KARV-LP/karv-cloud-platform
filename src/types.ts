@@ -33,8 +33,12 @@ interface SecretBindings {
 
 interface SecurityBindings {
   AI_RATE_LIMITER?: RateLimitBinding;
+  KARV_PROJECT_POLICIES?: string;
 }
 
-export type Env = Omit<CloudflareBindings, "AI_RATE_LIMITER"> &
+export type Env = Omit<
+  CloudflareBindings,
+  "AI_RATE_LIMITER" | "KARV_PROJECT_POLICIES"
+> &
   SecurityBindings &
   SecretBindings;
