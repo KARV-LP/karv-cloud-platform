@@ -11,29 +11,15 @@
       "dataset": "karv_platform_metrics"
     }
   ],
-  "unsafe": {
-    "bindings": [
-      {
-        "name": "AI_RATE_LIMITER",
-        "type": "ratelimit",
-        "namespace_id": "1000",
-        "simple": {
-          "limit": 30,
-          "period": 60
-        }
-      }
-    ]
-  },
   "triggers": {
     "crons": ["0 12 * * MON", "0 12 1 * *"]
   },
   "vars": {
     "AI_API_ENABLED": "false",
     "AI_GATEWAY_BASE_URL": "",
-    "ALLOWED_ORIGINS": "",
+    "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com",
     "KARV_DEFAULT_PROJECT": "karv-lps",
     "KARV_PROJECTS": "karv-lps,KV_COLLAB_BLING,3D,karv-cloud-platform",
-    "KARV_PROJECT_POLICIES": "{\"karv-lps\":{\"tasks\":[\"catalog_summary\",\"order_summary\",\"seo_draft\"],\"maxInputChars\":8000},\"KV_COLLAB_BLING\":{\"tasks\":[\"order_summary\"],\"maxInputChars\":6000},\"3D\":{\"tasks\":[\"catalog_summary\"],\"maxInputChars\":4000},\"karv-cloud-platform\":{\"tasks\":[\"catalog_summary\"],\"maxInputChars\":4000}}",
     "OPENAI_MODEL": "gpt-5.6-terra",
     "ANTHROPIC_MODEL": "claude-sonnet-4-5",
     "REPORT_DELIVERY_ENABLED": "false",
@@ -100,29 +86,15 @@
           "dataset": "karv_platform_metrics"
         }
       ],
-      "unsafe": {
-        "bindings": [
-          {
-            "name": "AI_RATE_LIMITER",
-            "type": "ratelimit",
-            "namespace_id": "1002",
-            "simple": {
-              "limit": 10,
-              "period": 60
-            }
-          }
-        ]
-      },
       "triggers": {
         "crons": ["0 12 * * MON", "0 12 1 * *"]
       },
       "vars": {
         "AI_API_ENABLED": "false",
         "AI_GATEWAY_BASE_URL": "",
-        "ALLOWED_ORIGINS": "",
+        "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com",
         "KARV_DEFAULT_PROJECT": "karv-lps",
         "KARV_PROJECTS": "karv-lps,KV_COLLAB_BLING,3D,karv-cloud-platform",
-        "KARV_PROJECT_POLICIES": "{\"karv-lps\":{\"tasks\":[\"catalog_summary\",\"order_summary\",\"seo_draft\"],\"maxInputChars\":8000},\"KV_COLLAB_BLING\":{\"tasks\":[\"order_summary\"],\"maxInputChars\":6000},\"3D\":{\"tasks\":[\"catalog_summary\"],\"maxInputChars\":4000},\"karv-cloud-platform\":{\"tasks\":[\"catalog_summary\"],\"maxInputChars\":4000}}",
         "OPENAI_MODEL": "gpt-5.6-terra",
         "ANTHROPIC_MODEL": "claude-sonnet-4-5",
         "REPORT_DELIVERY_ENABLED": "false",
