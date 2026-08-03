@@ -66,7 +66,7 @@
       "vars": {
         "AI_API_ENABLED": "false",
         "AI_GATEWAY_BASE_URL": "https://gateway.ai.cloudflare.com/v1/d229397cfd525e985402adc042591d02/karv-ai-gateway-staging",
-        "ALLOWED_ORIGINS": "",
+        "ALLOWED_ORIGINS": "none",
         "KARV_DEFAULT_PROJECT": "karv-lps",
         "KARV_PROJECTS": "karv-lps,KV_COLLAB_BLING,3D,karv-cloud-platform",
         "KARV_PROJECT_POLICIES": "{\"karv-lps\":{\"tasks\":[\"catalog_summary\",\"order_summary\",\"seo_draft\"],\"maxInputChars\":8000},\"KV_COLLAB_BLING\":{\"tasks\":[\"order_summary\"],\"maxInputChars\":6000},\"3D\":{\"tasks\":[\"catalog_summary\"],\"maxInputChars\":4000},\"karv-cloud-platform\":{\"tasks\":[\"catalog_summary\"],\"maxInputChars\":4000}}",
