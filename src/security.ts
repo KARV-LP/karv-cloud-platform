@@ -179,7 +179,9 @@ function allowedOrigins(env: Env): Set<string> {
   return new Set(
     env.ALLOWED_ORIGINS.split(",")
       .map((value) => value.trim())
-      .filter(Boolean)
+      .filter(
+        (value) => Boolean(value) && value.toLowerCase() !== "none"
+      )
   );
 }
 
