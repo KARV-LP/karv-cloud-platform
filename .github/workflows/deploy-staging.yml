@@ -1,0 +1,50 @@
+name: Deploy Cloudflare staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DEPLOY-STAGING to confirm the staging deployment
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cloudflare-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    environment: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify explicit staging approval
+        env:
+          DEPLOY_CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: test "$DEPLOY_CONFIRMATION" = "DEPLOY-STAGING"
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run check --prefix monitoring-agent
+      - run: npm run dry-run:staging
+
+      - name: Deploy the disabled-by-default staging Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --env staging
+          wranglerVersion: "4.118.0"
