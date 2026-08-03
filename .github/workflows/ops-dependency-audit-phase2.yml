@@ -1,0 +1,109 @@
+name: OPS Dependency Audit — Phase 2 Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    name: dependency-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            monitoring-agent/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install monitoring-agent dependencies
+        run: npm ci --ignore-scripts --prefix monitoring-agent
+
+      - name: Audit all dependencies
+        shell: bash
+        run: |
+          set +e
+          npm audit --json > audit-root-all.json
+          ROOT_ALL_EXIT=$?
+          npm audit --omit=dev --json > audit-root-runtime.json
+          ROOT_RUNTIME_EXIT=$?
+          npm audit --prefix monitoring-agent --json > audit-monitoring-all.json
+          MONITORING_ALL_EXIT=$?
+          npm audit --prefix monitoring-agent --omit=dev --json > audit-monitoring-runtime.json
+          MONITORING_RUNTIME_EXIT=$?
+          set -e
+
+          printf '%s\n' \
+            "ROOT_ALL_EXIT=$ROOT_ALL_EXIT" \
+            "ROOT_RUNTIME_EXIT=$ROOT_RUNTIME_EXIT" \
+            "MONITORING_ALL_EXIT=$MONITORING_ALL_EXIT" \
+            "MONITORING_RUNTIME_EXIT=$MONITORING_RUNTIME_EXIT" \
+            > audit-exit-codes.txt
+
+      - name: Generate audit summary
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          const inputs = [
+            ['Root — all dependencies', 'audit-root-all.json'],
+            ['Root — runtime only', 'audit-root-runtime.json'],
+            ['Monitoring agent — all dependencies', 'audit-monitoring-all.json'],
+            ['Monitoring agent — runtime only', 'audit-monitoring-runtime.json'],
+          ];
+
+          const rows = [];
+          let parseFailure = false;
+
+          for (const [scope, file] of inputs) {
+            try {
+              const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+              const counts = report.metadata?.vulnerabilities;
+              if (!counts) throw new Error('metadata.vulnerabilities ausente');
+              rows.push({ scope, ...counts });
+            } catch (error) {
+              parseFailure = true;
+              rows.push({ scope, info: 'ERRO', low: 'ERRO', moderate: 'ERRO', high: 'ERRO', critical: 'ERRO', total: 'ERRO' });
+              console.error(`${scope}: ${error.message}`);
+            }
+          }
+
+          const header = '| Escopo | Info | Baixa | Moderada | Alta | Crítica | Total |';
+          const separator = '|---|---:|---:|---:|---:|---:|---:|';
+          const lines = rows.map((row) => `| ${row.scope} | ${row.info} | ${row.low} | ${row.moderate} | ${row.high} | ${row.critical} | ${row.total} |`);
+          const summary = ['# Dependency audit — Phase 2 gate', '', header, separator, ...lines, '', 'Relatórios JSON completos anexados como artifact.'].join('\n');
+
+          fs.writeFileSync('dependency-audit-summary.md', `${summary}\n`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+
+          if (parseFailure) process.exit(1);
+          NODE
+
+      - name: Upload audit reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-phase2
+          path: |
+            audit-root-all.json
+            audit-root-runtime.json
+            audit-monitoring-all.json
+            audit-monitoring-runtime.json
+            audit-exit-codes.txt
+            dependency-audit-summary.md
+          if-no-files-found: error
+          retention-days: 30
