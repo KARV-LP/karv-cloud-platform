@@ -38,7 +38,9 @@ Se nenhum dos dois secrets existir, a API responde `503`.
 
 ## CORS e acesso por navegador
 
-O padrão de staging é server-to-server. `ALLOWED_ORIGINS` fica vazio.
+O padrão de staging é server-to-server. `ALLOWED_ORIGINS` usa o marcador explícito `none`, interpretado pelo Worker como lista vazia.
+
+O marcador explícito evita que um valor vazio seja ignorado pelo deploy e preserve acidentalmente uma configuração antiga no runtime.
 
 Uma origem de navegador só pode ser adicionada após revisão explícita de arquitetura e segurança. Origens não autorizadas recebem `403` no preflight e não recebem headers CORS.
 
