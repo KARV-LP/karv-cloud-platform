@@ -1,0 +1,313 @@
+name: Harden Cloudflare staging (admin controls)
+
+# Fase 2 (issue #18) — controles administrativos do staging Cloudflare.
+# Sem Terraform: escopo pequeno, resolvido diretamente via API Cloudflare e
+# Wrangler. Este workflow nunca toca em produção e nunca habilita
+# AI_API_ENABLED, REPORTING_API_ENABLED ou REPORT_DELIVERY_ENABLED.
+#
+# O modo padrão é plan-only. O apply exige seleção explícita, confirmação
+# distinta e aprovação humana no Environment protegido.
+
+on:
+  workflow_dispatch:
+    inputs:
+      execution_mode:
+        description: "Modo de execução: plan apenas audita; apply audita e solicita aprovação para alterar staging"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+      confirmation:
+        description: "Digite PLAN-STAGING para plan ou APPLY-STAGING para apply"
+        required: true
+        type: string
+      ai_gateway_rate_limit_requests:
+        description: "Rate limit inicial recomendado — requisições permitidas na janela"
+        required: true
+        default: "10"
+        type: string
+      ai_gateway_rate_limit_period_seconds:
+        description: "Rate limit inicial recomendado — duração da janela em segundos"
+        required: true
+        default: "60"
+        type: string
+      ai_gateway_spend_limit_amount:
+        description: "Limite global de custo do AI Gateway staging (USD). Deixe em branco para preservar o estado atual."
+        required: false
+        type: string
+      ai_gateway_spend_limit_window:
+        description: "Janela em segundos. Para 24 horas, use 86400. Deixe em branco no plan sem spend limit."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: harden-cloudflare-staging
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan (somente leitura, sem mutação)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    steps:
+      - name: Verify explicit execution mode and confirmation
+        env:
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${EXECUTION_MODE}:${CONFIRMATION}" in
+            plan:PLAN-STAGING|apply:APPLY-STAGING) ;;
+            *)
+              echo "Confirmação inválida para o modo ${EXECUTION_MODE}. Use PLAN-STAGING ou APPLY-STAGING conforme o modo selecionado." >&2
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Require read-only Cloudflare audit token
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_AUDIT_API_TOKEN }}
+        shell: bash
+        run: test -n "$TOKEN" || { echo "secrets.CLOUDFLARE_AUDIT_API_TOKEN ausente no Environment staging." >&2; exit 1; }
+
+      - name: Require CLOUDFLARE_ACCOUNT_ID
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: test -n "$ACCOUNT_ID" || { echo "vars.CLOUDFLARE_ACCOUNT_ID ausente no Environment staging." >&2; exit 1; }
+
+      - name: Confirm critical feature flags remain disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
+            if grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*\"true\"" wrangler.jsonc; then
+              echo "Refusing to proceed: $flag is true in wrangler.jsonc" >&2
+              exit 1
+            fi
+          done
+
+      - name: Validate numeric and spend-limit inputs
+        env:
+          RATE_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          RATE_PERIOD: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          SPEND_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          SPEND_WINDOW: ${{ inputs.ai_gateway_spend_limit_window }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RATE_REQUESTS" in ''|*[!0-9]*) echo "ai_gateway_rate_limit_requests deve ser um inteiro positivo." >&2; exit 1;; esac
+          [ "$RATE_REQUESTS" -gt 0 ] || { echo "ai_gateway_rate_limit_requests deve ser maior que zero." >&2; exit 1; }
+          case "$RATE_PERIOD" in ''|*[!0-9]*) echo "ai_gateway_rate_limit_period_seconds deve ser um inteiro positivo." >&2; exit 1;; esac
+          [ "$RATE_PERIOD" -gt 0 ] || { echo "ai_gateway_rate_limit_period_seconds deve ser maior que zero." >&2; exit 1; }
+
+          if [ -n "$SPEND_AMOUNT" ] || [ -n "$SPEND_WINDOW" ]; then
+            [ -n "$SPEND_AMOUNT" ] || { echo "ai_gateway_spend_limit_amount é obrigatório quando a janela é informada." >&2; exit 1; }
+            [ -n "$SPEND_WINDOW" ] || { echo "ai_gateway_spend_limit_window é obrigatório quando o valor é informado." >&2; exit 1; }
+            [[ "$SPEND_AMOUNT" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "ai_gateway_spend_limit_amount deve ser um número positivo." >&2; exit 1; }
+            awk -v value="$SPEND_AMOUNT" 'BEGIN { exit !(value > 0) }' || { echo "ai_gateway_spend_limit_amount deve ser maior que zero." >&2; exit 1; }
+            case "$SPEND_WINDOW" in ''|*[!0-9]*) echo "ai_gateway_spend_limit_window deve ser um inteiro positivo." >&2; exit 1;; esac
+            [ "$SPEND_WINDOW" -eq 86400 ] || { echo "ai_gateway_spend_limit_window deve ser 86400 para a janela diária de 24 horas." >&2; exit 1; }
+          fi
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Pre-apply audit — estado atual e alteração proposta (sem mutação)
+        env:
+          AUDIT_MODE: pre
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_AUDIT_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          PROPOSED_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          PROPOSED_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          PROPOSED_SPEND_LIMIT_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          PROPOSED_SPEND_LIMIT_WINDOW: ${{ inputs.ai_gateway_spend_limit_window }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "## Auditoria pré-apply (staging admin hardening, sanitizada)"
+            echo "Modo solicitado: ${{ inputs.execution_mode }}"
+            echo '```'
+            node scripts/cloudflare-admin-audit.mjs 2>&1
+            status=$?
+            echo '```'
+            exit "$status"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply (requer seleção e aprovação humana separada)
+    if: ${{ inputs.execution_mode == 'apply' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging-admin-hardening-apply
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify Environment has required reviewers before any mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ENVIRONMENT_NAME: staging-admin-hardening-apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_url="https://api.github.com/repos/${REPOSITORY}/environments/${ENVIRONMENT_NAME}"
+          response="$(
+            curl --fail --silent --show-error --max-time 30 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "$api_url"
+          )"
+          reviewer_count="$(
+            printf '%s' "$response" |
+              jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length'
+          )"
+          [ "$reviewer_count" -gt 0 ] || {
+            echo "Environment ${ENVIRONMENT_NAME} não possui required reviewers. Apply bloqueado antes de qualquer mutação." >&2
+            exit 1
+          }
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - run: npm ci
+
+      - name: Require CLOUDFLARE_ADMIN_API_TOKEN
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+        shell: bash
+        run: test -n "$TOKEN" || { echo "secrets.CLOUDFLARE_ADMIN_API_TOKEN ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Require KARV_INTERNAL_API_TOKEN
+        env:
+          TOKEN: ${{ secrets.KARV_INTERNAL_API_TOKEN }}
+        shell: bash
+        run: test -n "$TOKEN" || { echo "secrets.KARV_INTERNAL_API_TOKEN ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Require CLOUDFLARE_ACCOUNT_ID
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: test -n "$ACCOUNT_ID" || { echo "vars.CLOUDFLARE_ACCOUNT_ID ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Require STAGING_HEALTH_URL
+        env:
+          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HEALTH_URL" || { echo "vars.STAGING_HEALTH_URL ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+          case "$HEALTH_URL" in https://*) ;; *) echo "STAGING_HEALTH_URL deve usar HTTPS." >&2; exit 1;; esac
+
+      - name: Require Cloudflare Access service token for protected staging health check
+        env:
+          ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
+          ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ACCESS_CLIENT_ID" || { echo "secrets.CLOUDFLARE_ACCESS_CLIENT_ID ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+          test -n "$ACCESS_CLIENT_SECRET" || { echo "secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Confirm critical feature flags remain disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
+            if grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*\"true\"" wrangler.jsonc; then
+              echo "Refusing to proceed: $flag is true in wrangler.jsonc" >&2
+              exit 1
+            fi
+          done
+
+      - name: Set KARV_INTERNAL_API_TOKEN secret on the staging Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          KARV_INTERNAL_API_TOKEN: ${{ secrets.KARV_INTERNAL_API_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$KARV_INTERNAL_API_TOKEN" |
+            npx wrangler secret put KARV_INTERNAL_API_TOKEN --env staging
+
+      - name: Configure AI Gateway staging (rate limit, ZDR, spend limit)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          AI_GATEWAY_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          AI_GATEWAY_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          AI_GATEWAY_SPEND_LIMIT_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          AI_GATEWAY_SPEND_LIMIT_WINDOW: ${{ inputs.ai_gateway_spend_limit_window }}
+        run: node scripts/cloudflare-ai-gateway-configure.mjs
+
+      - name: Post-apply audit (estrita — falha se algo não foi confirmado)
+        env:
+          AUDIT_MODE: post
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          EXPECTED_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          EXPECTED_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          EXPECTED_SPEND_LIMIT_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          EXPECTED_SPEND_LIMIT_WINDOW: ${{ inputs.ai_gateway_spend_limit_window }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "## Auditoria pós-apply (staging admin hardening, sanitizada)"
+            echo '```'
+            node scripts/cloudflare-admin-audit.mjs 2>&1
+            status=$?
+            echo '```'
+            exit "$status"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Remote health check on Access-protected staging
+        env:
+          STAGING_HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+          CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
+          CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(
+            curl --silent --show-error --max-time 30 \
+              -H "CF-Access-Client-Id: ${CLOUDFLARE_ACCESS_CLIENT_ID}" \
+              -H "CF-Access-Client-Secret: ${CLOUDFLARE_ACCESS_CLIENT_SECRET}" \
+              --output /dev/null --write-out "%{http_code}" \
+              "$STAGING_HEALTH_URL"
+          )"
+          test "$status" = "200" || { echo "Health check protegido por Access falhou com status $status" >&2; exit 1; }
+
+      - name: Confirm production and feature flags untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
+            if grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*\"true\"" wrangler.jsonc; then
+              echo "$flag is true after apply — this should never happen." >&2
+              exit 1
+            fi
+          done
+          echo "O workflow não contém comandos direcionados ao Worker de produção ou ao env.production."
