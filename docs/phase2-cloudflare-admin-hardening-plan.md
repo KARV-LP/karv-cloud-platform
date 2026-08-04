@@ -31,15 +31,18 @@ O workflow tem dois jobs:
 2. `apply`: usa o Environment `staging-admin-hardening-apply`, só prossegue se a API do GitHub
    confirmar ao menos um required reviewer e executa depois do `plan`.
 
-Nenhum workflow foi executado durante a implementação deste PR.
+Nenhum workflow administrativo foi executado durante as Etapas 1 e 2. Somente os workflows de CI
+sem secrets foram executados para validar o código da PR.
 
 ## Limitação de execução antes do merge
 
 O evento `workflow_dispatch` só pode ser disparado quando o arquivo do workflow existe na branch
 padrão. Portanto, o `plan` administrativo real só poderá ser executado depois que esta PR for
-mergeada. Antes do merge, a PR precisa de um workflow separado de validação estática e testes
-mockados acionado por `pull_request`. Esse gate será incorporado antes de retirar a PR do modo
-draft.
+mergeada.
+
+Antes do merge, a PR é validada pelo workflow separado
+`.github/workflows/admin-hardening-ci.yml`, acionado por `pull_request`, sem acesso a secrets. Esse
+gate foi implementado e aprovado na Etapa 2.
 
 ## Schema confirmado da API Cloudflare
 
@@ -115,16 +118,55 @@ seguida de escrita não garante que o valor retornado seja reutilizável com seg
 
 Todas as chamadas HTTP do Node e do shell possuem timeout explícito.
 
-## Cadeia de suprimentos do workflow
+## Cadeia de suprimentos dos workflows
 
-As Actions externas são fixadas por SHA completo e verificado no repositório oficial:
+As Actions externas usadas nos workflows administrativos são fixadas por SHA completo e verificado
+no repositório oficial:
 
 - `actions/checkout` v6.0.2 — `de0fac2e4500dabe0009e67214ff5f5447ce83dd`;
 - `actions/setup-node` v6.4.0 — `48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e`.
 
 O cache automático do `setup-node` é explicitamente desativado com
-`package-manager-cache: false`, porque este workflow possui acesso a credenciais administrativas e
-não depende de cache para operação segura.
+`package-manager-cache: false`. O CI especializado também opera somente com `contents: read` e não
+recebe secrets.
+
+## CI pré-merge — Etapa 2
+
+O workflow `.github/workflows/admin-hardening-ci.yml` executa em mudanças relacionadas ao hardening
+e valida:
+
+- checkout do SHA exato da PR;
+- sintaxe dos módulos Node;
+- parsing dos dois workflows YAML;
+- oito testes mockados reproduzíveis;
+- auditoria npm, tipagem e 26 testes do Worker;
+- dry-run do Worker de staging;
+- auditoria npm, tipagem e sete testes do Monitoring Agent;
+- `git diff --check`;
+- varredura das linhas adicionadas para padrões conhecidos de secrets.
+
+Os mocks cobrem:
+
+- payload por lista branca;
+- preservação sanitizada de regras externas de spend limit;
+- bloqueio antes do `PUT` quando há Stripe;
+- bloqueio antes do `PUT` quando há OpenTelemetry com `authorization`;
+- rejeição de spend limit incompleto antes de qualquer rede;
+- auditoria `pre` sem mutação;
+- auditoria `post` aprovada;
+- auditoria `post` falhando estritamente em divergência;
+- scanner de secrets sem reproduzir o valor detectado na saída.
+
+Evidências do head `1e540596dfa061e78eb91c6b836916c3775c97bd`:
+
+- `Admin Hardening CI`, run `30919577309`: aprovado;
+- `CI`, run `30919576873`: aprovado;
+- testes administrativos: 8/8;
+- Worker: 26/26;
+- Monitoring Agent: 7/7;
+- vulnerabilidades: zero nos dois projetos;
+- dry-run de staging: aprovado;
+- diff e varredura de secrets: aprovados.
 
 ## Credenciais e GitHub Environments
 
@@ -253,12 +295,13 @@ A revisão integral da PR identificou e corrigiu:
 - Actions referenciadas por tags móveis;
 - cache automático habilitável em workflow privilegiado.
 
-Permanece para a Etapa 2:
-
-- adicionar CI acionado por `pull_request` com testes automatizados e mocks reproduzíveis;
-- validar a PR antes do merge, porque `workflow_dispatch` não pode executar da branch da PR.
-
 Nenhum token real foi usado e nenhuma mutação Cloudflare foi executada durante a Etapa 1.
+
+## Resultado da Etapa 2
+
+A Etapa 2 está concluída. O CI especializado foi implementado, executado no GitHub Actions e
+aprovado junto com os jobs regulares da PR. A PR permanece em draft porque ainda faltam decisões
+administrativas e configuração dos Environments; não por falta de validação de código.
 
 ## Decisões humanas necessárias antes do apply
 
