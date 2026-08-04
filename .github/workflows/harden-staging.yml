@@ -5,32 +5,40 @@ name: Harden Cloudflare staging (admin controls)
 # Wrangler. Este workflow nunca toca em produção e nunca habilita
 # AI_API_ENABLED, REPORTING_API_ENABLED ou REPORT_DELIVERY_ENABLED.
 #
-# Controles ainda pendentes fora deste workflow: Cloudflare Access/proteção
-# administrativa equivalente e destinatário do alerta de custo. Rate limit,
-# ZDR, payload logging e spend limit do AI Gateway staging são implementados e
-# validados por leitura pós-escrita.
+# O modo padrão é plan-only. O apply exige seleção explícita, confirmação
+# distinta e aprovação humana no Environment protegido.
 
 on:
   workflow_dispatch:
     inputs:
+      execution_mode:
+        description: "Modo de execução: plan apenas audita; apply audita e solicita aprovação para alterar staging"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
       confirmation:
-        description: Type HARDEN-STAGING to confirm this administrative hardening run
+        description: "Digite PLAN-STAGING para plan ou APPLY-STAGING para apply"
         required: true
         type: string
       ai_gateway_rate_limit_requests:
-        description: "Decisão B — número de requisições permitidas na janela do AI Gateway staging"
+        description: "Rate limit inicial recomendado — requisições permitidas na janela"
         required: true
+        default: "10"
         type: string
       ai_gateway_rate_limit_period_seconds:
-        description: "Decisão B — duração da janela de rate limit, em segundos"
+        description: "Rate limit inicial recomendado — duração da janela em segundos"
         required: true
+        default: "60"
         type: string
       ai_gateway_spend_limit_amount:
-        description: "Decisão C — limite global de custo do AI Gateway staging (USD). Deixe em branco para preservar o estado atual."
+        description: "Limite global de custo do AI Gateway staging (USD). Deixe em branco para preservar o estado atual."
         required: false
         type: string
       ai_gateway_spend_limit_window:
-        description: "Decisão C — janela numérica aceita pelo campo spend_limits.rules[].window da API. Obrigatória com o valor."
+        description: "Janela numérica retornada/aceita pela API em spend_limits.rules[].window. Obrigatória com o valor."
         required: false
         type: string
 
@@ -44,16 +52,25 @@ concurrency:
 
 jobs:
   plan:
-    name: Audit (somente leitura, sem apply)
+    name: Plan (somente leitura, sem mutação)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: staging
     steps:
-      - name: Verify explicit hardening confirmation
+      - name: Verify explicit execution mode and confirmation
         env:
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
           CONFIRMATION: ${{ inputs.confirmation }}
         shell: bash
-        run: test "$CONFIRMATION" = "HARDEN-STAGING"
+        run: |
+          set -euo pipefail
+          case "${EXECUTION_MODE}:${CONFIRMATION}" in
+            plan:PLAN-STAGING|apply:APPLY-STAGING) ;;
+            *)
+              echo "Confirmação inválida para o modo ${EXECUTION_MODE}. Use PLAN-STAGING ou APPLY-STAGING conforme o modo selecionado." >&2
+              exit 1
+              ;;
+          esac
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -124,6 +141,7 @@ jobs:
           set -uo pipefail
           {
             echo "## Auditoria pré-apply (staging admin hardening, sanitizada)"
+            echo "Modo solicitado: ${{ inputs.execution_mode }}"
             echo '```'
             node scripts/cloudflare-admin-audit.mjs 2>&1
             status=$?
@@ -132,7 +150,8 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   apply:
-    name: Apply (requer aprovação humana separada)
+    name: Apply (requer seleção e aprovação humana separada)
+    if: ${{ inputs.execution_mode == 'apply' }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -201,6 +220,16 @@ jobs:
           test -n "$HEALTH_URL" || { echo "vars.STAGING_HEALTH_URL ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
           case "$HEALTH_URL" in https://*) ;; *) echo "STAGING_HEALTH_URL deve usar HTTPS." >&2; exit 1;; esac
 
+      - name: Require Cloudflare Access service token for protected staging health check
+        env:
+          ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
+          ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ACCESS_CLIENT_ID" || { echo "secrets.CLOUDFLARE_ACCESS_CLIENT_ID ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+          test -n "$ACCESS_CLIENT_SECRET" || { echo "secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
       - name: Confirm critical feature flags remain disabled
         shell: bash
         run: |
@@ -254,18 +283,22 @@ jobs:
             exit "$status"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Remote health check on staging
+      - name: Remote health check on Access-protected staging
         env:
           STAGING_HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+          CLOUDFLARE_ACCESS_CLIENT_ID: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
+          CLOUDFLARE_ACCESS_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
         shell: bash
         run: |
           set -euo pipefail
           status="$(
             curl --silent --show-error --location --max-time 30 \
+              -H "CF-Access-Client-Id: ${CLOUDFLARE_ACCESS_CLIENT_ID}" \
+              -H "CF-Access-Client-Secret: ${CLOUDFLARE_ACCESS_CLIENT_SECRET}" \
               --output /dev/null --write-out "%{http_code}" \
               "$STAGING_HEALTH_URL"
           )"
-          test "$status" = "200" || { echo "Health check falhou com status $status" >&2; exit 1; }
+          test "$status" = "200" || { echo "Health check protegido por Access falhou com status $status" >&2; exit 1; }
 
       - name: Confirm production and feature flags untouched
         shell: bash
