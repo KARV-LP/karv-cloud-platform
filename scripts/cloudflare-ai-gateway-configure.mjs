@@ -1,95 +1,120 @@
-// Configura rate limit, Zero Data Retention (ZDR) e, opcionalmente, spend
-// limit no AI Gateway staging via API Cloudflare (sem Terraform).
+// Configura rate limit, Zero Data Retention (ZDR) e, opcionalmente, uma regra
+// global de spend limit no AI Gateway staging via API Cloudflare.
 //
-// Em vez de espalhar (`...current`) a configuração atual de volta na
-// requisição PUT — o que reenviaria campos somente leitura como id,
-// created_at, modified_at, account_id e account_tag — este script remove
-// explicitamente esses campos e escreve apenas os controles que este
-// workflow gerencia. Qualquer outro campo lido da API é preservado como
-// veio, para não resetar configurações fora do escopo desta auditoria (cache,
-// autenticação, logpush etc.) por omissão.
-//
-// collect_logs e zdr são sempre forçados aos valores exigidos pela issue #18
-// (false e true, respectivamente) — não são inputs por execução. rate limit é
-// sempre aplicado. spend limit só é aplicado se ambos
-// AI_GATEWAY_SPEND_LIMIT_AMOUNT e AI_GATEWAY_SPEND_LIMIT_PERIOD estiverem
-// presentes; se ausentes, o campo não é tocado nesta execução.
-//
-// Os nomes de campo (zdr, spend_limit_amount, spend_limit_period,
-// rate_limiting_*, collect_logs) refletem os requisitos informados para este
-// workflow. Cada valor gravado é lido de volta e comparado byte a byte com o
-// solicitado; se a API não aceitar ou ignorar silenciosamente um campo, este
-// script falha em vez de reportar sucesso indevido.
+// O payload do PUT é construído por lista branca a partir dos campos graváveis
+// documentados pela API. Campos somente leitura ou desconhecidos nunca são
+// reenviados. A configuração Stripe não é reenviada: se estiver presente, o
+// script falha antes da mutação porque a preservação segura de credenciais não
+// pode ser garantida por uma leitura seguida de escrita.
 
-const READ_ONLY_FIELDS = ["id", "created_at", "modified_at", "account_id", "account_tag"];
+const AI_GATEWAY_ID = "karv-ai-gateway-staging";
 const RATE_LIMITING_TECHNIQUE = "sliding";
-const VALID_SPEND_LIMIT_PERIODS = new Set(["daily", "weekly", "monthly"]);
+const MANAGED_SPEND_LIMIT_RULE_ID = "karv-staging-global-budget";
+const MANAGED_SPEND_LIMIT_TECHNIQUE = "fixed";
+
+const OPTIONAL_WRITABLE_FIELDS_TO_PRESERVE = [
+  "authentication",
+  "dlp",
+  "guardrails",
+  "log_management",
+  "log_management_strategy",
+  "logpush",
+  "logpush_public_key",
+  "otel",
+  "retry_backoff",
+  "retry_delay",
+  "retry_max_attempts",
+  "store_id",
+  "workers_ai_billing_mode"
+];
 
 const accountId = requireEnv("CLOUDFLARE_ACCOUNT_ID");
 const apiToken = requireEnv("CLOUDFLARE_API_TOKEN");
-const requests = Number(requireEnv("AI_GATEWAY_RATE_LIMIT_REQUESTS"));
-const periodSeconds = Number(requireEnv("AI_GATEWAY_RATE_LIMIT_PERIOD_SECONDS"));
-
-if (!Number.isInteger(requests) || requests <= 0) {
-  console.error("AI_GATEWAY_RATE_LIMIT_REQUESTS deve ser um inteiro maior que zero.");
-  process.exit(1);
-}
-if (!Number.isInteger(periodSeconds) || periodSeconds <= 0) {
-  console.error("AI_GATEWAY_RATE_LIMIT_PERIOD_SECONDS deve ser um inteiro maior que zero.");
-  process.exit(1);
-}
+const requests = parsePositiveInteger(
+  requireEnv("AI_GATEWAY_RATE_LIMIT_REQUESTS"),
+  "AI_GATEWAY_RATE_LIMIT_REQUESTS"
+);
+const rateWindowSeconds = parsePositiveInteger(
+  requireEnv("AI_GATEWAY_RATE_LIMIT_PERIOD_SECONDS"),
+  "AI_GATEWAY_RATE_LIMIT_PERIOD_SECONDS"
+);
 
 const spendLimitAmountRaw = process.env.AI_GATEWAY_SPEND_LIMIT_AMOUNT ?? "";
-const spendLimitPeriodRaw = process.env.AI_GATEWAY_SPEND_LIMIT_PERIOD ?? "";
-const spendLimitRequested = spendLimitAmountRaw !== "" || spendLimitPeriodRaw !== "";
+const spendLimitWindowRaw = process.env.AI_GATEWAY_SPEND_LIMIT_WINDOW ?? "";
+const spendLimitRequested = spendLimitAmountRaw !== "" || spendLimitWindowRaw !== "";
 let spendLimitAmount;
-let spendLimitPeriod;
+let spendLimitWindow;
 
 if (spendLimitRequested) {
-  spendLimitAmount = Number(spendLimitAmountRaw);
-  spendLimitPeriod = spendLimitPeriodRaw;
-
-  if (!Number.isFinite(spendLimitAmount) || spendLimitAmount <= 0) {
-    console.error("AI_GATEWAY_SPEND_LIMIT_AMOUNT deve ser um número maior que zero.");
-    process.exit(1);
+  if (spendLimitAmountRaw === "" || spendLimitWindowRaw === "") {
+    fail(
+      "AI_GATEWAY_SPEND_LIMIT_AMOUNT e AI_GATEWAY_SPEND_LIMIT_WINDOW devem ser informados juntos."
+    );
   }
-  if (!VALID_SPEND_LIMIT_PERIODS.has(spendLimitPeriod)) {
-    console.error("AI_GATEWAY_SPEND_LIMIT_PERIOD deve ser daily, weekly ou monthly.");
-    process.exit(1);
-  }
+  spendLimitAmount = parsePositiveNumber(
+    spendLimitAmountRaw,
+    "AI_GATEWAY_SPEND_LIMIT_AMOUNT"
+  );
+  spendLimitWindow = parsePositiveInteger(
+    spendLimitWindowRaw,
+    "AI_GATEWAY_SPEND_LIMIT_WINDOW"
+  );
 } else {
   console.log(
-    "Spend limit não solicitado nesta execução (AI_GATEWAY_SPEND_LIMIT_AMOUNT/PERIOD ausentes) — campo não será tocado."
+    "Spend limit não solicitado nesta execução — a configuração existente será preservada."
   );
 }
 
-const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/karv-ai-gateway-staging`;
-
+const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${AI_GATEWAY_ID}`;
 const current = await cloudflareRequest(baseUrl, "GET");
+
+validateRequiredCurrentFields(current);
+if (current.stripe != null) {
+  fail(
+    "O AI Gateway possui configuração Stripe. O script recusou o PUT para não reenviar ou substituir credenciais por leitura-escrita. Tratar essa configuração separadamente."
+  );
+}
+
 console.log(
-  `Estado atual antes da mudança: rate_limit=${current.rate_limiting_limit ?? "não configurado"}/${current.rate_limiting_interval ?? "não configurado"}s, collect_logs=${current.collect_logs}, zdr=${current.zdr}, spend_limit=${current.spend_limit_amount ?? "não configurado"}/${current.spend_limit_period ?? "não configurado"}`
+  `Estado atual antes da mudança: rate_limit=${formatRateLimit(current)}, collect_logs=${JSON.stringify(current.collect_logs)}, zdr=${JSON.stringify(current.zdr)}, spend_limit=${formatManagedSpendLimit(current)}`
 );
 
-const payload = { ...current };
-for (const field of READ_ONLY_FIELDS) delete payload[field];
+const payload = {
+  cache_invalidate_on_update: current.cache_invalidate_on_update,
+  cache_ttl: current.cache_ttl,
+  collect_logs: false,
+  rate_limiting_interval: rateWindowSeconds,
+  rate_limiting_limit: requests,
+  rate_limiting_technique: RATE_LIMITING_TECHNIQUE,
+  zdr: true
+};
 
-payload.collect_logs = false;
-payload.zdr = true;
-payload.rate_limiting_limit = requests;
-payload.rate_limiting_interval = periodSeconds;
-payload.rate_limiting_technique = RATE_LIMITING_TECHNIQUE;
+for (const field of OPTIONAL_WRITABLE_FIELDS_TO_PRESERVE) {
+  if (Object.prototype.hasOwnProperty.call(current, field)) {
+    payload[field] = current[field];
+  }
+}
 
 if (spendLimitRequested) {
-  payload.spend_limit_amount = spendLimitAmount;
-  payload.spend_limit_period = spendLimitPeriod;
+  payload.spend_limits = buildSpendLimitsPayload(
+    current.spend_limits,
+    spendLimitAmount,
+    spendLimitWindow
+  );
+} else if (Object.prototype.hasOwnProperty.call(current, "spend_limits")) {
+  payload.spend_limits = current.spend_limits;
 }
 
 const updated = await cloudflareRequest(baseUrl, "PUT", payload);
-
 const mismatches = [];
-if (updated.rate_limiting_limit !== requests || updated.rate_limiting_interval !== periodSeconds) {
+
+if (
+  updated.rate_limiting_limit !== requests ||
+  updated.rate_limiting_interval !== rateWindowSeconds ||
+  updated.rate_limiting_technique !== RATE_LIMITING_TECHNIQUE
+) {
   mismatches.push(
-    `rate limit esperado ${requests}/${periodSeconds}s, obtido ${updated.rate_limiting_limit}/${updated.rate_limiting_interval}s`
+    `rate limit esperado ${requests}/${rateWindowSeconds}s (${RATE_LIMITING_TECHNIQUE}), obtido ${updated.rate_limiting_limit}/${updated.rate_limiting_interval}s (${updated.rate_limiting_technique})`
   );
 }
 if (updated.collect_logs !== false) {
@@ -98,25 +123,99 @@ if (updated.collect_logs !== false) {
 if (updated.zdr !== true) {
   mismatches.push(`zdr esperado true, obtido ${JSON.stringify(updated.zdr)}`);
 }
-if (
-  spendLimitRequested &&
-  (updated.spend_limit_amount !== spendLimitAmount || updated.spend_limit_period !== spendLimitPeriod)
-) {
-  mismatches.push(
-    `spend limit esperado ${spendLimitAmount}/${spendLimitPeriod}, obtido ${updated.spend_limit_amount}/${updated.spend_limit_period}`
-  );
+if (spendLimitRequested) {
+  const rule = findManagedSpendLimitRule(updated.spend_limits);
+  if (
+    updated.spend_limits?.enabled !== true ||
+    !rule ||
+    rule.enabled !== true ||
+    rule.limitType !== "cost" ||
+    rule.limit !== spendLimitAmount ||
+    rule.window !== spendLimitWindow ||
+    rule.technique !== MANAGED_SPEND_LIMIT_TECHNIQUE
+  ) {
+    mismatches.push(
+      `spend limit esperado ${spendLimitAmount}/window=${spendLimitWindow}, obtido ${formatManagedSpendLimit(updated)}`
+    );
+  }
 }
 
 if (mismatches.length > 0) {
-  console.error(
-    `A API Cloudflare não retornou os valores esperados após a atualização: ${mismatches.join("; ")}. Isso pode indicar que os nomes de campo do AI Gateway mudaram — verificar manualmente antes de repetir.`
+  fail(
+    `A API Cloudflare não retornou os valores esperados após a atualização: ${mismatches.join("; ")}. Não considerar o hardening concluído.`
   );
-  process.exit(1);
 }
 
 console.log(
-  `AI Gateway staging atualizado: rate limit ${requests} req/${periodSeconds}s, collect_logs=false, zdr=true${spendLimitRequested ? `, spend limit ${spendLimitAmount}/${spendLimitPeriod}` : ""}.`
+  `AI Gateway staging atualizado e confirmado: rate limit ${requests} req/${rateWindowSeconds}s, collect_logs=false, zdr=true${spendLimitRequested ? `, spend limit ${spendLimitAmount}/window=${spendLimitWindow}` : ""}.`
 );
+
+function buildSpendLimitsPayload(currentSpendLimits, amount, window) {
+  const existingRules = currentSpendLimits?.rules;
+  if (existingRules !== undefined && !Array.isArray(existingRules)) {
+    fail("spend_limits.rules retornado pela API não é uma lista; recusando a mutação.");
+  }
+
+  const rules = Array.isArray(existingRules) ? existingRules : [];
+  const withoutManagedRule = rules.filter(
+    (rule) => rule?.id !== MANAGED_SPEND_LIMIT_RULE_ID
+  );
+
+  if (withoutManagedRule.length >= 20) {
+    fail(
+      "O AI Gateway já possui 20 regras de spend limit e não contém a regra KARV gerenciada. Nenhuma mutação foi executada."
+    );
+  }
+
+  return {
+    enabled: true,
+    rules: [
+      ...withoutManagedRule,
+      {
+        id: MANAGED_SPEND_LIMIT_RULE_ID,
+        enabled: true,
+        limit: amount,
+        limitType: "cost",
+        window,
+        technique: MANAGED_SPEND_LIMIT_TECHNIQUE
+      }
+    ]
+  };
+}
+
+function findManagedSpendLimitRule(spendLimits) {
+  if (!Array.isArray(spendLimits?.rules)) return null;
+  return (
+    spendLimits.rules.find((rule) => rule?.id === MANAGED_SPEND_LIMIT_RULE_ID) ?? null
+  );
+}
+
+function formatManagedSpendLimit(gateway) {
+  const rule = findManagedSpendLimitRule(gateway?.spend_limits);
+  if (!rule) return "não configurado";
+  return `${rule.limit}/window=${rule.window} (${rule.technique ?? "sem técnica"}, enabled=${JSON.stringify(rule.enabled)})`;
+}
+
+function formatRateLimit(gateway) {
+  if (
+    typeof gateway?.rate_limiting_limit !== "number" ||
+    typeof gateway?.rate_limiting_interval !== "number"
+  ) {
+    return "não configurado";
+  }
+  return `${gateway.rate_limiting_limit}/${gateway.rate_limiting_interval}s (${gateway.rate_limiting_technique ?? "sem técnica"})`;
+}
+
+function validateRequiredCurrentFields(current) {
+  if (typeof current.cache_invalidate_on_update !== "boolean") {
+    fail(
+      `cache_invalidate_on_update inválido na resposta da API: ${JSON.stringify(current.cache_invalidate_on_update)}`
+    );
+  }
+  if (!(current.cache_ttl === null || typeof current.cache_ttl === "number")) {
+    fail(`cache_ttl inválido na resposta da API: ${JSON.stringify(current.cache_ttl)}`);
+  }
+}
 
 async function cloudflareRequest(url, method, body) {
   const response = await fetch(url, {
@@ -129,22 +228,37 @@ async function cloudflareRequest(url, method, body) {
   });
 
   const parsed = await response.json().catch(() => null);
-
   if (!response.ok || !parsed?.success) {
-    console.error(
+    fail(
       `Chamada Cloudflare (${method} ${new URL(url).pathname}) falhou com status ${response.status}: ${JSON.stringify(parsed?.errors ?? parsed)}`
     );
-    process.exit(1);
   }
-
   return parsed.result;
+}
+
+function parsePositiveInteger(raw, name) {
+  if (!/^\d+$/.test(raw)) fail(`${name} deve ser um inteiro maior que zero.`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    fail(`${name} deve ser um inteiro seguro maior que zero.`);
+  }
+  return value;
+}
+
+function parsePositiveNumber(raw, name) {
+  if (!/^\d+(\.\d+)?$/.test(raw)) fail(`${name} deve ser um número positivo.`);
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) fail(`${name} deve ser maior que zero.`);
+  return value;
 }
 
 function requireEnv(name) {
   const value = process.env[name];
-  if (!value) {
-    console.error(`Variável obrigatória ausente: ${name}`);
-    process.exit(1);
-  }
+  if (!value) fail(`Variável obrigatória ausente: ${name}`);
   return value;
+}
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
 }
