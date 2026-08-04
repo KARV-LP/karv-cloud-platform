@@ -1,0 +1,22 @@
+# Copie para terraform/backend.hcl (arquivo ignorado pelo Git) somente depois que
+# a decisão do backend remoto (ver docs/phase2-cloudflare-admin-hardening-plan.md)
+# tiver sido tomada e o bucket/workspace já existir. Nunca commitar backend.hcl.
+#
+# Opção 1 — Cloudflare R2 (compatível com S3), dentro da própria conta KARV:
+# bucket                      = "karv-terraform-state"
+# key                         = "karv-cloud-platform/staging-admin-hardening.tfstate"
+# region                      = "auto"
+# endpoints                   = { s3 = "https://<account_id>.r2.cloudflarestorage.com" }
+# skip_credentials_validation = true
+# skip_region_validation      = true
+# skip_requesting_account_id  = true
+# skip_s3_checksum            = true
+# use_path_style              = true
+#
+# Credenciais de acesso ao R2 (chave de acesso S3-compatível) devem virar
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY como novos GitHub Secrets no
+# Environment "staging" — nunca neste arquivo.
+#
+# Opção 2 — Terraform Cloud: este bloco "s3" não se aplica; versions.tf precisaria
+# trocar `backend "s3" {}` por um bloco `cloud { organization = "..." workspaces { name = "..." } }`,
+# o que é uma decisão estrutural separada, não apenas um arquivo de configuração.
