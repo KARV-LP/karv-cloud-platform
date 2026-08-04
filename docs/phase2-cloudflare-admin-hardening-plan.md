@@ -115,6 +115,17 @@ seguida de escrita não garante que o valor retornado seja reutilizável com seg
 
 Todas as chamadas HTTP do Node e do shell possuem timeout explícito.
 
+## Cadeia de suprimentos do workflow
+
+As Actions externas são fixadas por SHA completo e verificado no repositório oficial:
+
+- `actions/checkout` v6.0.2 — `de0fac2e4500dabe0009e67214ff5f5447ce83dd`;
+- `actions/setup-node` v6.4.0 — `48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e`.
+
+O cache automático do `setup-node` é explicitamente desativado com
+`package-manager-cache: false`, porque este workflow possui acesso a credenciais administrativas e
+não depende de cache para operação segura.
+
 ## Credenciais e GitHub Environments
 
 ### Environment `staging` — job `plan`
@@ -238,7 +249,9 @@ A revisão integral da PR identificou e corrigiu:
 - ausência de comparação pós-escrita dos campos preservados;
 - risco de reenviar credenciais OpenTelemetry;
 - ausência de timeout nas chamadas de rede;
-- detecção frágil das feature flags por espaçamento literal.
+- detecção frágil das feature flags por espaçamento literal;
+- Actions referenciadas por tags móveis;
+- cache automático habilitável em workflow privilegiado.
 
 Permanece para a Etapa 2:
 
