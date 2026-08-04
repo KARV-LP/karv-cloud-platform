@@ -9,48 +9,102 @@ testes negativos e validação remota — já foi incorporada nas PRs #19 e #22.
 Este trabalho não altera `production` e não habilita `AI_API_ENABLED`,
 `REPORTING_API_ENABLED` ou `REPORT_DELIVERY_ENABLED`.
 
-## Controles implementados neste PR
+A baseline operacional detalhada está em:
 
-O workflow manual `.github/workflows/harden-staging.yml` implementa e verifica:
+- `docs/phase2-admin-operational-baseline.md`.
+
+## Estado atual
+
+A PR #23 contém:
+
+- workflow manual de auditoria e apply administrativo;
+- auditoria read-only do Worker e do AI Gateway;
+- configuração por lista branca;
+- leitura pós-escrita estrita;
+- testes mockados reproduzíveis;
+- CI especializado sem secrets;
+- baseline de rate limit, custo, Access e GitHub Environments.
+
+Nenhum workflow administrativo foi executado. Nenhuma mutação Cloudflare foi realizada.
+
+## Controles implementados
+
+O workflow `.github/workflows/harden-staging.yml` implementa e verifica:
 
 - presença do secret `KARV_INTERNAL_API_TOKEN` no Worker de staging;
-- `collect_logs=false` no AI Gateway de staging;
-- `zdr=true` no AI Gateway de staging;
-- rate limit do AI Gateway com quantidade, janela e técnica `sliding`;
+- `collect_logs=false`;
+- `zdr=true`;
+- rate limit do AI Gateway;
 - regra global opcional de spend limit;
-- leitura pós-escrita estrita de todos os campos preservados e alterados;
-- health check remoto do staging;
-- confirmação de que as três feature flags críticas permanecem desativadas;
-- existência de pelo menos um required reviewer no Environment do `apply`, antes de qualquer
-  mutação.
+- preservação sanitizada dos campos existentes;
+- bloqueio de Stripe e OpenTelemetry com credenciais;
+- required reviewer antes da mutação;
+- health check protegido por Cloudflare Access;
+- feature flags críticas permanecendo desativadas.
 
-O workflow tem dois jobs:
+## Separação entre plan e apply
 
-1. `plan`: somente leitura. Valida os inputs antes de qualquer chamada de rede e publica
-   `atual → proposto` no Job Summary.
-2. `apply`: usa o Environment `staging-admin-hardening-apply`, só prossegue se a API do GitHub
-   confirmar ao menos um required reviewer e executa depois do `plan`.
+O workflow é acionado somente por `workflow_dispatch` e recebe `execution_mode`.
 
-Nenhum workflow administrativo foi executado durante as Etapas 1 e 2. Somente os workflows de CI
-sem secrets foram executados para validar o código da PR.
+### `plan`
 
-## Limitação de execução antes do merge
+- modo padrão;
+- confirmação literal `PLAN-STAGING`;
+- usa somente `CLOUDFLARE_AUDIT_API_TOKEN`;
+- não agenda o job de mutação;
+- publica estado atual e proposta no Job Summary.
 
-O evento `workflow_dispatch` só pode ser disparado quando o arquivo do workflow existe na branch
-padrão. Portanto, o `plan` administrativo real só poderá ser executado depois que esta PR for
-mergeada.
+### `apply`
 
-Antes do merge, a PR é validada pelo workflow separado
-`.github/workflows/admin-hardening-ci.yml`, acionado por `pull_request`, sem acesso a secrets. Esse
-gate foi implementado e aprovado na Etapa 2.
+- deve ser selecionado explicitamente;
+- confirmação literal `APPLY-STAGING`;
+- executa o plan antes;
+- agenda o job protegido somente se o plan passar;
+- exige aprovação no Environment `staging-admin-hardening-apply`;
+- exige Cloudflare Access Service Token para o health check.
 
-## Schema confirmado da API Cloudflare
+O evento `workflow_dispatch` só pode ser executado quando o workflow existe na branch padrão.
+Portanto, qualquer run administrativo ocorrerá somente após merge explícito da PR.
 
-Em 4 de agosto de 2026, o schema foi conferido na documentação oficial do endpoint:
+## Baseline administrativa da Etapa 3
 
-`PUT /accounts/{account_id}/ai-gateway/gateways/{id}`
+### Rate limit
 
-Os campos usados por este workflow são:
+- `10` requisições;
+- `60` segundos;
+- técnica `sliding`.
+
+Esses valores são defaults visíveis no formulário do workflow.
+
+### Spend limit
+
+Baseline proposta:
+
+- `USD 5`;
+- janela diária;
+- técnica `fixed`;
+- bloqueio HTTP `429`.
+
+A API define `spend_limits.rules[].window` como inteiro positivo, mas a documentação do schema não
+informa a unidade. O workflow não supõe uma conversão.
+
+O primeiro plan deve manter spend limit vazio. O valor numérico da janela diária deve ser
+confirmado no painel ou em resposta real da API antes de qualquer apply com orçamento.
+
+### Alerta de custo
+
+Baseline:
+
+- nome `KARV staging usage warning`;
+- threshold `USD 10` por ciclo;
+- destinatário `comercial@k-arv.com`.
+
+O alerta é account-wide e informativo. O spend limit do gateway continua sendo o mecanismo de
+bloqueio.
+
+## Schema da API Cloudflare
+
+O workflow usa:
 
 - `collect_logs`;
 - `zdr`;
@@ -58,256 +112,212 @@ Os campos usados por este workflow são:
 - `rate_limiting_interval`;
 - `rate_limiting_technique`;
 - `spend_limits.enabled`;
-- `spend_limits.rules[]`, com `id`, `enabled`, `limit`, `limitType`, `window`, `metadata`,
-  `model`, `provider` e `technique`.
+- `spend_limits.rules[]`.
 
-A implementação anterior que usava `spend_limit_amount` e `spend_limit_period` estava incorreta
-e foi substituída pelo schema real `spend_limits.rules[]`.
+Cada regra preservável pode conter:
+
+- `id`;
+- `enabled`;
+- `limit`;
+- `limitType`;
+- `window`;
+- `metadata`;
+- `model`;
+- `provider`;
+- `technique`.
 
 Referências oficiais:
 
 - https://developers.cloudflare.com/api/resources/ai_gateway/methods/update/
 - https://developers.cloudflare.com/ai-gateway/features/spend-limits/
+- https://developers.cloudflare.com/ai-gateway/features/rate-limiting/
 
-A referência da API define `window` como número positivo, mas não informa sua unidade na descrição
-do campo. Por isso, o workflow recebe `ai_gateway_spend_limit_window` como valor numérico literal e
-não converte automaticamente `daily`, `weekly` ou `monthly`. Antes do primeiro apply com spend
-limit, o valor deve ser confirmado no painel Cloudflare ou em uma resposta real da API. Se os dois
-inputs do spend limit não forem informados, o estado existente é preservado e verificado após o
-`PUT`.
+## Regra global KARV
 
-## Regra global de spend limit KARV
-
-Quando solicitada, a regra gerenciada pelo workflow usa:
+Quando solicitada, a regra gerenciada usa:
 
 ```text
 {
   "id": "karv-staging-global-budget",
   "enabled": true,
   "limitType": "cost",
-  "limit": <número informado>,
-  "window": <inteiro informado>,
+  "limit": <número confirmado>,
+  "window": <inteiro confirmado>,
   "technique": "fixed"
 }
 ```
 
-A regra não contém dimensões de modelo, provedor ou metadata; portanto, representa um orçamento
-global compartilhado pelo gateway. Regras externas existentes são reconstruídas por lista branca,
-preservadas e comparadas após a escrita. O script substitui somente a regra com o ID acima e falha
-antes da escrita se a inclusão ultrapassaria o limite de 20 regras por gateway.
+A regra não possui dimensão de modelo, provedor ou metadata. Ela representa um orçamento global
+compartilhado pelo gateway.
 
-Spend limits são limites de custo estimado. Ao atingir o orçamento, o AI Gateway bloqueia novas
-requisições aplicáveis com HTTP 429 até a janela reiniciar. O valor exato da cobrança deve continuar
-sendo verificado no provedor de IA.
+Regras externas válidas são reconstruídas por lista branca, preservadas e comparadas após a
+escrita. O script altera somente a regra com o ID acima.
 
-## Payload explícito e preservação segura
+## Payload e comportamento fail-closed
 
-O `PUT` não reaproveita a resposta inteira da API. O payload é montado por lista branca com os
-campos graváveis documentados.
+O `PUT` é montado por lista branca. Campos somente leitura ou desconhecidos não são reenviados.
 
-Os campos obrigatórios `cache_invalidate_on_update` e `cache_ttl` são validados e preservados.
-Campos opcionais documentados são preservados somente quando presentes e são comparados com a
-resposta pós-escrita. Campos somente leitura ou desconhecidos nunca são reenviados.
+Campos obrigatórios preservados:
 
-As regras de spend limit também são sanitizadas individualmente. Apenas `id`, `enabled`, `limit`,
-`limitType`, `window`, `metadata`, `model`, `provider` e `technique` podem ser reenviados.
+- `cache_invalidate_on_update`;
+- `cache_ttl`.
 
-Se a resposta atual contiver configuração `stripe` ou uma entrada OpenTelemetry com
-`authorization`, o script falha antes da mutação. Esses objetos contêm credenciais e uma leitura
-seguida de escrita não garante que o valor retornado seja reutilizável com segurança.
+Campos opcionais documentados são preservados somente quando presentes e comparados após a
+escrita.
 
-Todas as chamadas HTTP do Node e do shell possuem timeout explícito.
+O script falha antes do `PUT` quando:
 
-## Cadeia de suprimentos dos workflows
+- a resposta atual contém Stripe;
+- OpenTelemetry contém `authorization`;
+- o schema é incompatível;
+- spend limit foi informado parcialmente;
+- o limite de regras seria excedido;
+- a API não pode ser lida.
 
-As Actions externas usadas nos workflows administrativos são fixadas por SHA completo e verificado
-no repositório oficial:
+A auditoria pós-apply falha se qualquer controle não corresponder ao solicitado.
 
-- `actions/checkout` v6.0.2 — `de0fac2e4500dabe0009e67214ff5f5447ce83dd`;
-- `actions/setup-node` v6.4.0 — `48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e`.
+## Cloudflare Access
 
-O cache automático do `setup-node` é explicitamente desativado com
-`package-manager-cache: false`. O CI especializado também opera somente com `contents: read` e não
-recebe secrets.
+O Worker `karv-cloud-platform-staging` pode ser protegido diretamente em `workers.dev`; não é
+necessário migrar primeiro para domínio próprio.
 
-## CI pré-merge — Etapa 2
+A configuração recomendada é:
 
-O workflow `.github/workflows/admin-hardening-ci.yml` executa em mudanças relacionadas ao hardening
-e valida:
+- Access habilitado no Worker;
+- política humana Allow somente para administradores autorizados;
+- política `Service Auth`;
+- Service Token exclusivo `karv-staging-github-actions`;
+- Client ID e Client Secret armazenados somente no Environment protegido.
 
-- checkout do SHA exato da PR;
-- sintaxe dos módulos Node;
-- parsing dos dois workflows YAML;
-- oito testes mockados reproduzíveis;
-- auditoria npm, tipagem e 26 testes do Worker;
-- dry-run do Worker de staging;
-- auditoria npm, tipagem e sete testes do Monitoring Agent;
-- `git diff --check`;
-- varredura das linhas adicionadas para padrões conhecidos de secrets.
+O health check envia:
 
-Os mocks cobrem:
+- `CF-Access-Client-Id`;
+- `CF-Access-Client-Secret`.
 
-- payload por lista branca;
-- preservação sanitizada de regras externas de spend limit;
-- bloqueio antes do `PUT` quando há Stripe;
-- bloqueio antes do `PUT` quando há OpenTelemetry com `authorization`;
-- rejeição de spend limit incompleto antes de qualquer rede;
-- auditoria `pre` sem mutação;
-- auditoria `post` aprovada;
-- auditoria `post` falhando estritamente em divergência;
-- scanner de secrets sem reproduzir o valor detectado na saída.
+Referências:
 
-Evidências do head `1e540596dfa061e78eb91c6b836916c3775c97bd`:
+- https://developers.cloudflare.com/workers/configuration/routing/workers-dev/
+- https://developers.cloudflare.com/cloudflare-one/access-controls/applications/choose-application-type/
+- https://developers.cloudflare.com/workers/local-development/
 
-- `Admin Hardening CI`, run `30919577309`: aprovado;
-- `CI`, run `30919576873`: aprovado;
-- testes administrativos: 8/8;
-- Worker: 26/26;
-- Monitoring Agent: 7/7;
-- vulnerabilidades: zero nos dois projetos;
-- dry-run de staging: aprovado;
-- diff e varredura de secrets: aprovados.
+## GitHub Environments
 
-## Credenciais e GitHub Environments
+### `staging`
 
-### Environment `staging` — job `plan`
+Variável:
 
-- secret `CLOUDFLARE_AUDIT_API_TOKEN`;
-- variable `CLOUDFLARE_ACCOUNT_ID`.
+- `CLOUDFLARE_ACCOUNT_ID`.
 
-O token de auditoria deve ser somente leitura:
+Secret:
+
+- `CLOUDFLARE_AUDIT_API_TOKEN`.
+
+Permissões mínimas:
 
 - AI Gateway Read;
 - Workers Scripts Read.
 
-### Environment `staging-admin-hardening-apply` — job `apply`
+### `staging-admin-hardening-apply`
 
-- pelo menos um required reviewer configurado;
-- secret `CLOUDFLARE_ADMIN_API_TOKEN`;
-- secret `KARV_INTERNAL_API_TOKEN`;
-- variable `CLOUDFLARE_ACCOUNT_ID`;
-- variable `STAGING_HEALTH_URL`.
+Proteções:
 
-O workflow consulta `GET /repos/{owner}/{repo}/environments/staging-admin-hardening-apply` usando
-o `GITHUB_TOKEN` com `actions: read` e falha antes da primeira mutação se a regra
-`required_reviewers` estiver ausente ou vazia.
+- required reviewer;
+- `Prevent self-review`;
+- branch `main`;
+- sem bypass operacional normal.
 
-Os valores dos secrets nunca são impressos.
+Variáveis:
 
-## Permissões do token administrativo
+- `CLOUDFLARE_ACCOUNT_ID`;
+- `STAGING_HEALTH_URL`.
 
-O `CLOUDFLARE_ADMIN_API_TOKEN` do Environment protegido precisa de:
+Secrets:
+
+- `CLOUDFLARE_ADMIN_API_TOKEN`;
+- `KARV_INTERNAL_API_TOKEN`;
+- `CLOUDFLARE_ACCESS_CLIENT_ID`;
+- `CLOUDFLARE_ACCESS_CLIENT_SECRET`.
+
+Permissões mínimas do token administrativo:
 
 - AI Gateway Read;
 - AI Gateway Write;
 - Workers Scripts Write.
 
-`Workers Scripts Write` também permite alterar código do Worker; a Cloudflare não oferece neste
-endpoint uma permissão exclusiva para secrets. Por isso, esse token não deve existir no job
-`plan`, deve ficar somente no Environment protegido do `apply` e deve ser restrito à conta KARV.
+Com `Prevent self-review`, um segundo GitHub user com acesso de leitura é obrigatório. O iniciador
+do workflow não pode ser o único revisor.
 
-Este workflow não usa Access, Notifications, DNS ou Billing. Permissões não usadas devem ser
-removidas.
+## CI pré-merge
 
-## Validação e comportamento fail-closed
+O workflow `.github/workflows/admin-hardening-ci.yml` executa sem secrets e valida:
 
-Antes de qualquer chamada à API Cloudflare, o job `plan` valida:
+- checkout do SHA exato;
+- sintaxe dos módulos Node;
+- parsing YAML;
+- oito testes mockados;
+- auditoria npm;
+- tipagem e 26 testes do Worker;
+- dry-run de staging;
+- tipagem e sete testes do Monitoring Agent;
+- `git diff --check`;
+- scanner das linhas adicionadas.
 
-- rate limit como inteiros positivos;
-- spend limit como par completo `amount + window`, ou nenhum dos dois;
-- amount como número positivo;
-- window como inteiro positivo;
-- confirmação literal `HARDEN-STAGING`;
-- feature flags críticas desativadas.
+Os mocks cobrem:
 
-Antes de qualquer mutação, o job `apply` valida pela API do GitHub que o Environment possui
-required reviewer.
+- payload por lista branca;
+- preservação de regra externa;
+- bloqueio de Stripe;
+- bloqueio de OpenTelemetry com autorização;
+- validação antes da rede;
+- auditoria pre;
+- auditoria post;
+- falha fechada em divergência;
+- scanner sem exposição do valor detectado.
 
-A auditoria `post` falha se não confirmar:
+## Sequência operacional
 
-- secret do Worker presente;
-- `collect_logs=false`;
-- `zdr=true`;
-- rate limit idêntico ao solicitado;
-- regra KARV de spend limit idêntica ao solicitado, quando aplicável.
-
-O script de configuração também falha se qualquer campo preservado divergir após o `PUT`, se a API
-não puder ser lida, se o schema retornado for incompatível ou se configurações Stripe/OpenTelemetry
-impedirem preservação segura.
-
-A saída das auditorias é enviada ao Job Summary sem mascarar o código de saída do processo Node.
-
-## Controles ainda pendentes fora deste PR
-
-Este PR não resolve e não deve declarar como concluídos:
-
-- Cloudflare Access ou proteção administrativa equivalente;
-- destinatário e canal do alerta de custo;
-- lista de administradores autorizados da conta Cloudflare;
-- escolha entre login humano e Service Auth;
-- valores de negócio para rate limit;
-- valor e janela do spend limit.
-
-O staging atual em `workers.dev` exige uma decisão de infraestrutura antes de aplicar Access a um
-hostname próprio. Essa decisão não é automatizada neste workflow.
+1. revisar e aprovar a PR #23;
+2. fazer merge explícito;
+3. configurar os dois GitHub Environments;
+4. criar tokens Cloudflare com privilégio mínimo;
+5. habilitar Access no Worker;
+6. criar Service Token e política `Service Auth`;
+7. criar alerta de orçamento;
+8. executar `plan` com `10/60` e spend limit vazio;
+9. confirmar o valor numérico da janela diária;
+10. executar novo `plan` com `USD 5` e a janela confirmada;
+11. revisar o Job Summary;
+12. executar `apply`;
+13. obter aprovação do revisor independente;
+14. registrar evidência sanitizada na issue #18.
 
 ## Critério de fechamento da issue #18
 
-A issue #18 permanece aberta. Código implementado não é evidência de execução.
+A issue permanece aberta até existir evidência não sensível de:
 
-Ela só poderá ser encerrada quando houver evidência não sensível de:
-
-1. workflow executado em staging;
-2. auditoria pós-apply aprovada;
-3. health check aprovado;
-4. secret do Worker presente;
+1. plan real aprovado;
+2. apply real aprovado;
+3. health check através do Access;
+4. Worker secret presente;
 5. rate limit confirmado;
-6. ZDR e payload logging confirmados;
-7. spend limit confirmado, depois da decisão de orçamento;
-8. Access ou proteção equivalente resolvida;
-9. destinatário do alerta de custo resolvido.
+6. `zdr=true`;
+7. `collect_logs=false`;
+8. spend limit confirmado;
+9. Access ativo;
+10. alerta de orçamento configurado;
+11. administradores autorizados revisados.
 
-Até lá, a IA, reporting e delivery permanecem desativados.
+Até lá, IA, reporting e delivery permanecem desativados.
 
 ## Rollback
 
 | Alteração | Rollback |
 | --- | --- |
-| `KARV_INTERNAL_API_TOKEN` no Worker | Excluir o secret com Wrangler ou restaurar o valor anterior conforme o runbook de rotação. |
-| Rate limit, ZDR, logging e spend limit | Usar os valores registrados no Job Summary do `plan` e executar um rollback administrativo revisado. |
-| Arquivos deste PR | Reverter o PR em uma alteração separada. |
+| Worker secret | Excluir ou restaurar conforme o runbook de rotação. |
+| Rate limit, ZDR, logging e spend limit | Restaurar os valores registrados no Job Summary do plan. |
+| Access | Desabilitar somente após incidente revisado ou substituir a política por uma versão aprovada. |
+| Service Token | Revogar o token e remover os secrets do Environment. |
+| Arquivos da PR | Reverter em alteração separada. |
 
-O rollback não é automático porque pode envolver segredo anterior e decisões administrativas que
-não devem ser inferidas pelo workflow.
-
-## Revisão técnica da Etapa 1
-
-A revisão integral da PR identificou e corrigiu:
-
-- código de saída da auditoria mascarado pelo pipe para `tee`;
-- token administrativo com escrita exposto no job `plan`;
-- ausência de verificação técnica de required reviewers antes da mutação;
-- preservação de regras de spend limit sem lista branca;
-- ausência de comparação pós-escrita dos campos preservados;
-- risco de reenviar credenciais OpenTelemetry;
-- ausência de timeout nas chamadas de rede;
-- detecção frágil das feature flags por espaçamento literal;
-- Actions referenciadas por tags móveis;
-- cache automático habilitável em workflow privilegiado.
-
-Nenhum token real foi usado e nenhuma mutação Cloudflare foi executada durante a Etapa 1.
-
-## Resultado da Etapa 2
-
-A Etapa 2 está concluída. O CI especializado foi implementado, executado no GitHub Actions e
-aprovado junto com os jobs regulares da PR. A PR permanece em draft porque ainda faltam decisões
-administrativas e configuração dos Environments; não por falta de validação de código.
-
-## Decisões humanas necessárias antes do apply
-
-- definir quantidade e janela do rate limit;
-- definir valor e `window` do spend limit, após confirmar a unidade exibida pela Cloudflare;
-- configurar ou confirmar os dois GitHub Environments;
-- revisar o Job Summary do `plan`;
-- aprovar separadamente o job `apply`;
-- decidir Access/proteção equivalente e destinatário do alerta de custo.
+O rollback não é automático porque pode envolver secrets e decisões administrativas que não devem
+ser inferidas pelo workflow.
