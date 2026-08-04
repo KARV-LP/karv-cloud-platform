@@ -36,6 +36,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: harden-cloudflare-staging
@@ -58,11 +59,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require CLOUDFLARE_ADMIN_API_TOKEN
+      - name: Require read-only Cloudflare audit token
         env:
-          TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+          TOKEN: ${{ secrets.CLOUDFLARE_AUDIT_API_TOKEN }}
         shell: bash
-        run: test -n "$TOKEN" || { echo "secrets.CLOUDFLARE_ADMIN_API_TOKEN ausente no Environment staging." >&2; exit 1; }
+        run: test -n "$TOKEN" || { echo "secrets.CLOUDFLARE_AUDIT_API_TOKEN ausente no Environment staging." >&2; exit 1; }
 
       - name: Require CLOUDFLARE_ACCOUNT_ID
         env:
@@ -73,8 +74,9 @@ jobs:
       - name: Confirm critical feature flags remain disabled
         shell: bash
         run: |
+          set -euo pipefail
           for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
-            if grep -q "\"$flag\": \"true\"" wrangler.jsonc; then
+            if grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*\"true\"" wrangler.jsonc; then
               echo "Refusing to proceed: $flag is true in wrangler.jsonc" >&2
               exit 1
             fi
@@ -88,6 +90,7 @@ jobs:
           SPEND_WINDOW: ${{ inputs.ai_gateway_spend_limit_window }}
         shell: bash
         run: |
+          set -euo pipefail
           case "$RATE_REQUESTS" in ''|*[!0-9]*) echo "ai_gateway_rate_limit_requests deve ser um inteiro positivo." >&2; exit 1;; esac
           [ "$RATE_REQUESTS" -gt 0 ] || { echo "ai_gateway_rate_limit_requests deve ser maior que zero." >&2; exit 1; }
           case "$RATE_PERIOD" in ''|*[!0-9]*) echo "ai_gateway_rate_limit_period_seconds deve ser um inteiro positivo." >&2; exit 1;; esac
@@ -110,7 +113,7 @@ jobs:
       - name: Pre-apply audit — estado atual e alteração proposta (sem mutação)
         env:
           AUDIT_MODE: pre
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_AUDIT_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           PROPOSED_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
           PROPOSED_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
@@ -118,11 +121,14 @@ jobs:
           PROPOSED_SPEND_LIMIT_WINDOW: ${{ inputs.ai_gateway_spend_limit_window }}
         shell: bash
         run: |
+          set -uo pipefail
           {
             echo "## Auditoria pré-apply (staging admin hardening, sanitizada)"
             echo '```'
-            node scripts/cloudflare-admin-audit.mjs
+            node scripts/cloudflare-admin-audit.mjs 2>&1
+            status=$?
             echo '```'
+            exit "$status"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   apply:
@@ -135,6 +141,31 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Verify Environment has required reviewers before any mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ENVIRONMENT_NAME: staging-admin-hardening-apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_url="https://api.github.com/repos/${REPOSITORY}/environments/${ENVIRONMENT_NAME}"
+          response="$(
+            curl --fail --silent --show-error --location --max-time 30 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "$api_url"
+          )"
+          reviewer_count="$(
+            printf '%s' "$response" |
+              jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length'
+          )"
+          [ "$reviewer_count" -gt 0 ] || {
+            echo "Environment ${ENVIRONMENT_NAME} não possui required reviewers. Apply bloqueado antes de qualquer mutação." >&2
+            exit 1
+          }
 
       - uses: actions/setup-node@v6
         with:
@@ -165,13 +196,17 @@ jobs:
         env:
           HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
         shell: bash
-        run: test -n "$HEALTH_URL" || { echo "vars.STAGING_HEALTH_URL ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+        run: |
+          set -euo pipefail
+          test -n "$HEALTH_URL" || { echo "vars.STAGING_HEALTH_URL ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+          case "$HEALTH_URL" in https://*) ;; *) echo "STAGING_HEALTH_URL deve usar HTTPS." >&2; exit 1;; esac
 
       - name: Confirm critical feature flags remain disabled
         shell: bash
         run: |
+          set -euo pipefail
           for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
-            if grep -q "\"$flag\": \"true\"" wrangler.jsonc; then
+            if grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*\"true\"" wrangler.jsonc; then
               echo "Refusing to proceed: $flag is true in wrangler.jsonc" >&2
               exit 1
             fi
@@ -183,7 +218,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           KARV_INTERNAL_API_TOKEN: ${{ secrets.KARV_INTERNAL_API_TOKEN }}
         shell: bash
-        run: printf '%s' "$KARV_INTERNAL_API_TOKEN" | npx wrangler secret put KARV_INTERNAL_API_TOKEN --env staging
+        run: |
+          set -euo pipefail
+          printf '%s' "$KARV_INTERNAL_API_TOKEN" |
+            npx wrangler secret put KARV_INTERNAL_API_TOKEN --env staging
 
       - name: Configure AI Gateway staging (rate limit, ZDR, spend limit)
         env:
@@ -206,11 +244,14 @@ jobs:
           EXPECTED_SPEND_LIMIT_WINDOW: ${{ inputs.ai_gateway_spend_limit_window }}
         shell: bash
         run: |
+          set -uo pipefail
           {
             echo "## Auditoria pós-apply (staging admin hardening, sanitizada)"
             echo '```'
-            node scripts/cloudflare-admin-audit.mjs
+            node scripts/cloudflare-admin-audit.mjs 2>&1
+            status=$?
             echo '```'
+            exit "$status"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Remote health check on staging
@@ -218,16 +259,22 @@ jobs:
           STAGING_HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
         shell: bash
         run: |
-          status=$(curl -s -o /dev/null -w "%{http_code}" "$STAGING_HEALTH_URL")
+          set -euo pipefail
+          status="$(
+            curl --silent --show-error --location --max-time 30 \
+              --output /dev/null --write-out "%{http_code}" \
+              "$STAGING_HEALTH_URL"
+          )"
           test "$status" = "200" || { echo "Health check falhou com status $status" >&2; exit 1; }
 
       - name: Confirm production and feature flags untouched
         shell: bash
         run: |
+          set -euo pipefail
           for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
-            if grep -q "\"$flag\": \"true\"" wrangler.jsonc; then
+            if grep -Eq "\"$flag\"[[:space:]]*:[[:space:]]*\"true\"" wrangler.jsonc; then
               echo "$flag is true after apply — this should never happen." >&2
               exit 1
             fi
           done
-          echo "Nenhuma chamada deste job referenciou o Worker de produção (karv-cloud-platform) ou o env.production do wrangler.jsonc."
+          echo "O workflow não contém comandos direcionados ao Worker de produção ou ao env.production."
