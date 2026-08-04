@@ -6,9 +6,10 @@ name: Harden Cloudflare staging (admin controls)
 # AI_API_ENABLED, REPORTING_API_ENABLED ou REPORT_DELIVERY_ENABLED — nenhuma
 # chamada aqui referencia o ambiente production nem o Worker de produção.
 #
-# Controles registrados como bloqueio administrativo, não implementados aqui
-# (ver docs/phase2-cloudflare-admin-hardening-plan.md): Cloudflare Access, spend
-# limit/orçamento, destinatário de alerta de custo, lista de administradores.
+# Controles ainda registrados como bloqueio administrativo, não implementados
+# aqui (ver docs/phase2-cloudflare-admin-hardening-plan.md): Cloudflare Access
+# e destinatário do alerta de custo. Rate limit, ZDR e spend limit do AI
+# Gateway staging são implementados e validados de fato.
 
 on:
   workflow_dispatch:
@@ -25,6 +26,19 @@ on:
         description: "Decisão B — duração da janela, em segundos"
         required: true
         type: string
+      ai_gateway_spend_limit_amount:
+        description: "Decisão C — valor do spend limit do AI Gateway staging (USD). Deixe em branco para não alterar o spend limit nesta execução."
+        required: false
+        type: string
+      ai_gateway_spend_limit_period:
+        description: "Decisão C — período do spend limit. Obrigatório se o valor acima for informado."
+        required: false
+        type: choice
+        options:
+          - ""
+          - daily
+          - weekly
+          - monthly
 
 permissions:
   contents: read
@@ -72,16 +86,39 @@ jobs:
             fi
           done
 
+      - name: Validate numeric and spend-limit inputs
+        env:
+          RATE_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          RATE_PERIOD: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          SPEND_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          SPEND_PERIOD: ${{ inputs.ai_gateway_spend_limit_period }}
+        shell: bash
+        run: |
+          case "$RATE_REQUESTS" in ''|*[!0-9]*) echo "ai_gateway_rate_limit_requests deve ser um inteiro positivo." >&2; exit 1;; esac
+          [ "$RATE_REQUESTS" -gt 0 ] || { echo "ai_gateway_rate_limit_requests deve ser maior que zero." >&2; exit 1; }
+          case "$RATE_PERIOD" in ''|*[!0-9]*) echo "ai_gateway_rate_limit_period_seconds deve ser um inteiro positivo." >&2; exit 1;; esac
+          [ "$RATE_PERIOD" -gt 0 ] || { echo "ai_gateway_rate_limit_period_seconds deve ser maior que zero." >&2; exit 1; }
+
+          if [ -n "$SPEND_AMOUNT" ] || [ -n "$SPEND_PERIOD" ]; then
+            [ -n "$SPEND_AMOUNT" ] || { echo "ai_gateway_spend_limit_amount é obrigatório quando ai_gateway_spend_limit_period é informado." >&2; exit 1; }
+            [ -n "$SPEND_PERIOD" ] || { echo "ai_gateway_spend_limit_period é obrigatório quando ai_gateway_spend_limit_amount é informado." >&2; exit 1; }
+            case "$SPEND_AMOUNT" in ''|*[!0-9.]*) echo "ai_gateway_spend_limit_amount deve ser numérico." >&2; exit 1;; esac
+          fi
+
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
 
-      - name: Pre-apply audit (registra estado inicial, não falha por controle ausente)
+      - name: Pre-apply audit — estado atual e alteração proposta (sem mutação)
         env:
           AUDIT_MODE: pre
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          PROPOSED_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          PROPOSED_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          PROPOSED_SPEND_LIMIT_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          PROPOSED_SPEND_LIMIT_PERIOD: ${{ inputs.ai_gateway_spend_limit_period }}
         shell: bash
         run: |
           {
@@ -156,12 +193,14 @@ jobs:
         shell: bash
         run: printf '%s' "$KARV_INTERNAL_API_TOKEN" | npx wrangler secret put KARV_INTERNAL_API_TOKEN --env staging
 
-      - name: Configure AI Gateway staging rate limit
+      - name: Configure AI Gateway staging (rate limit, ZDR, spend limit)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           AI_GATEWAY_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
           AI_GATEWAY_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          AI_GATEWAY_SPEND_LIMIT_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          AI_GATEWAY_SPEND_LIMIT_PERIOD: ${{ inputs.ai_gateway_spend_limit_period }}
         run: node scripts/cloudflare-ai-gateway-configure.mjs
 
       - name: Post-apply audit (estrita — falha se algo não foi confirmado)
@@ -171,6 +210,8 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           EXPECTED_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
           EXPECTED_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+          EXPECTED_SPEND_LIMIT_AMOUNT: ${{ inputs.ai_gateway_spend_limit_amount }}
+          EXPECTED_SPEND_LIMIT_PERIOD: ${{ inputs.ai_gateway_spend_limit_period }}
         shell: bash
         run: |
           {
