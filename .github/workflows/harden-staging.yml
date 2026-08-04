@@ -1,12 +1,14 @@
 name: Harden Cloudflare staging (admin controls)
 
 # Fase 2 (issue #18) — controles administrativos do staging Cloudflare.
-# Este workflow nunca toca em produção e nunca habilita AI_API_ENABLED,
-# REPORTING_API_ENABLED ou REPORT_DELIVERY_ENABLED.
+# Sem Terraform: escopo pequeno, resolvido diretamente via API Cloudflare e
+# Wrangler. Este workflow nunca toca em produção e nunca habilita
+# AI_API_ENABLED, REPORTING_API_ENABLED ou REPORT_DELIVERY_ENABLED — nenhuma
+# chamada aqui referencia o ambiente production nem o Worker de produção.
 #
-# Nenhum valor de rate limit, spend limit, destinatário de alerta ou lista de
-# administradores é fixado neste arquivo — todos são inputs explícitos do
-# disparo manual, conforme docs/phase2-cloudflare-admin-hardening-plan.md.
+# Controles registrados como bloqueio administrativo, não implementados aqui
+# (ver docs/phase2-cloudflare-admin-hardening-plan.md): Cloudflare Access, spend
+# limit/orçamento, destinatário de alerta de custo, lista de administradores.
 
 on:
   workflow_dispatch:
@@ -15,40 +17,12 @@ on:
         description: Type HARDEN-STAGING to confirm this administrative hardening run
         required: true
         type: string
-      admin_allowed_principals:
-        description: "Decisão A — e-mails/domínios autorizados a administrar o staging (separados por vírgula)"
-        required: true
-        type: string
-      admin_auth_method:
-        description: "Decisão E — método de autenticação administrativa"
-        required: true
-        type: choice
-        options:
-          - human_login
-          - service_token
-          - both
       ai_gateway_rate_limit_requests:
-        description: "Decisão B — número de requisições permitidas na janela"
+        description: "Decisão B — número de requisições permitidas na janela do AI Gateway staging"
         required: true
         type: string
       ai_gateway_rate_limit_period_seconds:
         description: "Decisão B — duração da janela, em segundos"
-        required: true
-        type: string
-      spend_limit_amount:
-        description: "Decisão C — valor do limite de gasto (deixe em branco se ainda não confirmado que o controle existe no Cloudflare)"
-        required: false
-        type: string
-      spend_limit_period:
-        description: "Decisão C — período do limite de gasto"
-        required: false
-        type: choice
-        options:
-          - ""
-          - daily
-          - monthly
-      cost_alert_recipient:
-        description: "Decisão D — destinatário do alerta de custo (e-mail ou webhook)"
         required: true
         type: string
 
@@ -61,12 +35,10 @@ concurrency:
 
 jobs:
   plan:
-    name: Audit + terraform plan (sem apply)
+    name: Audit (somente leitura, sem apply)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: staging
-    outputs:
-      plan-generated: ${{ steps.plan.outcome == 'success' }}
     steps:
       - name: Verify explicit hardening confirmation
         env:
@@ -78,18 +50,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Refuse to run against production
+      - name: Require CLOUDFLARE_ADMIN_API_TOKEN
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
         shell: bash
-        run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ github.event_name }}" = "push" ]; then
-            echo "This workflow only supports manual dispatch, never push to main." >&2
-            exit 1
-          fi
+        run: test -n "$TOKEN" || { echo "secrets.CLOUDFLARE_ADMIN_API_TOKEN ausente no Environment staging." >&2; exit 1; }
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
+      - name: Require CLOUDFLARE_ACCOUNT_ID
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: test -n "$ACCOUNT_ID" || { echo "vars.CLOUDFLARE_ACCOUNT_ID ausente no Environment staging." >&2; exit 1; }
 
       - name: Confirm critical feature flags remain disabled
         shell: bash
@@ -101,71 +72,24 @@ jobs:
             fi
           done
 
-      - name: Read-only audit — confirm internal secret name exists (no value read)
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Pre-apply audit (registra estado inicial, não falha por controle ausente)
         env:
+          AUDIT_MODE: pre
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         shell: bash
-        run: node scripts/cloudflare-admin-audit.mjs
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.9.8"
-
-      - name: terraform fmt
-        working-directory: terraform
-        run: terraform fmt -check -diff
-
-      - name: Require provisioned remote backend
-        working-directory: terraform
-        shell: bash
-        run: |
-          if [ ! -f backend.hcl ]; then
-            echo "terraform/backend.hcl não existe. O backend remoto (Terraform Cloud ou Cloudflare R2) precisa ser decidido e provisionado antes desta execução — ver docs/phase2-cloudflare-admin-hardening-plan.md." >&2
-            exit 1
-          fi
-
-      - name: terraform init
-        working-directory: terraform
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
-        run: terraform init -backend-config=backend.hcl
-
-      - name: terraform validate
-        working-directory: terraform
-        run: terraform validate
-
-      - name: terraform plan (sanitized)
-        id: plan
-        working-directory: terraform
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
-          TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          TF_VAR_admin_allowed_principals: ${{ inputs.admin_allowed_principals }}
-          TF_VAR_admin_auth_method: ${{ inputs.admin_auth_method }}
-          TF_VAR_ai_gateway_rate_limit_requests: ${{ inputs.ai_gateway_rate_limit_requests }}
-          TF_VAR_ai_gateway_rate_limit_period_seconds: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
-          TF_VAR_spend_limit_amount: ${{ inputs.spend_limit_amount }}
-          TF_VAR_spend_limit_period: ${{ inputs.spend_limit_period }}
-          TF_VAR_cost_alert_recipient: ${{ inputs.cost_alert_recipient }}
-        run: terraform plan -no-color -out=tfplan.bin
-
-      - name: Render sanitized plan to job summary
-        working-directory: terraform
         run: |
           {
-            echo "## Terraform plan (staging admin hardening, sanitized)"
+            echo "## Auditoria pré-apply (staging admin hardening, sanitizada)"
             echo '```'
-            terraform show -no-color tfplan.bin
+            node scripts/cloudflare-admin-audit.mjs
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload sanitized plan artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: staging-admin-hardening-plan
-          path: terraform/tfplan.bin
-          retention-days: 14
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   apply:
     name: Apply (requer aprovação humana separada)
@@ -173,49 +97,104 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Este Environment deve ter "required reviewers" configurado em
-    # Settings → Environments → staging-admin-hardening-apply. Sem essa
-    # aprovação humana explícita, este job fica pendente e nunca aplica
-    # sozinho.
+    # Settings → Environments → staging-admin-hardening-apply, com secrets
+    # próprios (CLOUDFLARE_ADMIN_API_TOKEN, KARV_INTERNAL_API_TOKEN) e
+    # variables próprias (CLOUDFLARE_ACCOUNT_ID, STAGING_HEALTH_URL). Nada é
+    # herdado por presunção do Environment "staging".
     environment: staging-admin-hardening-apply
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/setup-node@v6
         with:
-          terraform_version: "1.9.8"
+          node-version: 22
+          cache: npm
 
-      - name: Download sanitized plan artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: staging-admin-hardening-plan
-          path: terraform
+      - run: npm ci
 
-      - name: terraform init
-        working-directory: terraform
+      - name: Require CLOUDFLARE_ADMIN_API_TOKEN
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+        shell: bash
+        run: test -n "$TOKEN" || { echo "secrets.CLOUDFLARE_ADMIN_API_TOKEN ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Require KARV_INTERNAL_API_TOKEN
+        env:
+          TOKEN: ${{ secrets.KARV_INTERNAL_API_TOKEN }}
+        shell: bash
+        run: test -n "$TOKEN" || { echo "secrets.KARV_INTERNAL_API_TOKEN ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Require CLOUDFLARE_ACCOUNT_ID
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: test -n "$ACCOUNT_ID" || { echo "vars.CLOUDFLARE_ACCOUNT_ID ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Require STAGING_HEALTH_URL
+        env:
+          HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
+        shell: bash
+        run: test -n "$HEALTH_URL" || { echo "vars.STAGING_HEALTH_URL ausente no Environment staging-admin-hardening-apply." >&2; exit 1; }
+
+      - name: Confirm critical feature flags remain disabled
+        shell: bash
+        run: |
+          for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
+            if grep -q "\"$flag\": \"true\"" wrangler.jsonc; then
+              echo "Refusing to proceed: $flag is true in wrangler.jsonc" >&2
+              exit 1
+            fi
+          done
+
+      - name: Set KARV_INTERNAL_API_TOKEN secret on the staging Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
-        run: terraform init -backend-config=backend.hcl
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          KARV_INTERNAL_API_TOKEN: ${{ secrets.KARV_INTERNAL_API_TOKEN }}
+        shell: bash
+        run: printf '%s' "$KARV_INTERNAL_API_TOKEN" | npx wrangler secret put KARV_INTERNAL_API_TOKEN --env staging
 
-      - name: terraform apply (staging only, plano previamente revisado)
-        working-directory: terraform
+      - name: Configure AI Gateway staging rate limit
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
-        run: terraform apply -no-color -auto-approve tfplan.bin
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          AI_GATEWAY_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          AI_GATEWAY_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+        run: node scripts/cloudflare-ai-gateway-configure.mjs
 
-      - name: Remote validation — staging health after hardening
+      - name: Post-apply audit (estrita — falha se algo não foi confirmado)
+        env:
+          AUDIT_MODE: post
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          EXPECTED_RATE_LIMIT_REQUESTS: ${{ inputs.ai_gateway_rate_limit_requests }}
+          EXPECTED_RATE_LIMIT_PERIOD_SECONDS: ${{ inputs.ai_gateway_rate_limit_period_seconds }}
+        shell: bash
+        run: |
+          {
+            echo "## Auditoria pós-apply (staging admin hardening, sanitizada)"
+            echo '```'
+            node scripts/cloudflare-admin-audit.mjs
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Remote health check on staging
         env:
           STAGING_HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
         shell: bash
         run: |
           status=$(curl -s -o /dev/null -w "%{http_code}" "$STAGING_HEALTH_URL")
-          test "$status" = "200"
+          test "$status" = "200" || { echo "Health check falhou com status $status" >&2; exit 1; }
 
-      - name: Confirm production untouched
+      - name: Confirm production and feature flags untouched
         shell: bash
         run: |
-          if git diff --name-only HEAD~1 HEAD | grep -E '(^wrangler\.jsonc$)'; then
-            git diff HEAD~1 HEAD -- wrangler.jsonc | grep -A2 '"production"' || true
-          fi
-          echo "Manual confirmation required: no production section changed by this run."
+          for flag in AI_API_ENABLED REPORTING_API_ENABLED REPORT_DELIVERY_ENABLED; do
+            if grep -q "\"$flag\": \"true\"" wrangler.jsonc; then
+              echo "$flag is true after apply — this should never happen." >&2
+              exit 1
+            fi
+          done
+          echo "Nenhuma chamada deste job referenciou o Worker de produção (karv-cloud-platform) ou o env.production do wrangler.jsonc."

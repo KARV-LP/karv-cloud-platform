@@ -8,202 +8,186 @@ projeto, rate limiting no Worker e testes negativos) já foi mergeada nas PRs #1
 Nenhuma ação deste plano altera `production`, habilita `AI_API_ENABLED`,
 `REPORTING_API_ENABLED` ou `REPORT_DELIVERY_ENABLED`.
 
+Revisão externa ao commit `f4f7a65` removeu o uso de Terraform deste escopo: o backend
+remoto não existia, `backend.hcl` seria sempre ignorado pelo Git, e o schema exato do recurso
+Terraform para AI Gateway não estava comprovado. Para este tamanho de escopo, os controles são
+implementados diretamente via API Cloudflare e Wrangler dentro do workflow, sem IaC.
+
 ## Credenciais disponíveis
 
-Definidas no GitHub Environment `staging`, nunca lidas ou impressas por este plano:
+Definidas em dois GitHub Environments, nunca lidas ou impressas por este plano:
 
-- `CLOUDFLARE_API_TOKEN` (secret) — uso exclusivo do workflow de deploy existente.
-- `CLOUDFLARE_ADMIN_API_TOKEN` (secret) — uso exclusivo do novo workflow de hardening
-  administrativo. Não deve ser reutilizado para deploy.
-- `KARV_INTERNAL_API_TOKEN` (secret) — credencial interna do Worker; usada apenas para
-  confirmar existência via listagem de nomes de secret, nunca lida por valor.
+**Environment `staging`** (usado pelo job `plan`, somente leitura):
+- `CLOUDFLARE_ADMIN_API_TOKEN` (secret).
 - `CLOUDFLARE_ACCOUNT_ID` (variable, não secreta).
 
-## Permissões mínimas propostas para `CLOUDFLARE_ADMIN_API_TOKEN`
+**Environment `staging-admin-hardening-apply`** (usado pelo job `apply`, com required
+reviewer; secrets/variables próprios, nunca herdados por presunção de outro Environment):
+- `CLOUDFLARE_ADMIN_API_TOKEN` (secret) — mesmo valor do token administrativo.
+- `KARV_INTERNAL_API_TOKEN` (secret) — valor a ser cadastrado no Worker staging.
+- `CLOUDFLARE_ACCOUNT_ID` (variable, não secreta).
+- `STAGING_HEALTH_URL` (variable, não secreta) — URL pública de `/health` do staging, usada só
+  para validação remota pós-apply.
 
-O token deve ser escopado por API Token do Cloudflare (não Global API Key), restrito à conta
-KARV, com apenas as permissões abaixo. Qualquer permissão além destas deve ser reportada como
-excesso e a execução deve ser interrompida:
+O workflow falha explicitamente, com mensagem clara, se qualquer um destes estiver ausente —
+nunca presume um valor herdado de outro Environment (ver `harden-staging.yml`, steps
+"Require ...").
 
-- **Workers Scripts: Read** — listar nomes de secrets do Worker staging (nunca ler valores).
-- **Account Settings: Read** — verificar membros/roles da conta para evidência de acesso
-  administrativo.
-- **AI Gateway: Edit** — ler e ajustar rate limit e configuração de retenção/log do gateway
-  `karv-ai-gateway-staging`.
-- **Zero Trust: Access: Edit** — somente se a decisão de Access (ver seção "Cloudflare Access")
-  confirmar a necessidade.
+`CLOUDFLARE_API_TOKEN` (uso exclusivo de `deploy-staging.yml`) não é usado por este workflow.
 
-Sem permissão de **Workers Scripts: Edit/Write**, **DNS: Edit** ou **Billing**. Se o token
-fornecido tiver escopo além do necessário, o workflow deve abortar e reportar o excesso em vez
-de seguir.
+## Permissões do token administrativo — alinhadas ao que é realmente usado
 
-## Categorização dos recursos (Terraform vs. API/Wrangler vs. ação humana)
+O token candidato mencionado na revisão externa cobre cinco permissões:
 
-| Controle | Mecanismo | Motivo |
+- AI Gateway Read
+- AI Gateway Write
+- Access: Apps and Policies Write
+- Workers Scripts Write
+- Notifications Write
+
+**Uso real neste workflow:**
+
+| Permissão | Usada? | Onde |
 | --- | --- | --- |
-| Confirmar existência de `KARV_INTERNAL_API_TOKEN` | Cloudflare API (`GET .../workers/scripts/{name}/secrets`), leitura de nomes apenas | Terraform não deve gerenciar nem ler valores de secret; evita gravar segredo em state. |
-| Rate limit do AI Gateway | Terraform (`cloudflare_ai_gateway`, se o provider expuser os campos de rate limit) ou, se o schema não suportar, chamada direta à API do AI Gateway no workflow | A ser confirmado em `terraform validate`; ver "Riscos e incertezas". |
-| Spend limit / orçamento e alerta de custo | Provável **ação humana fora do Cloudflare** — o gasto real ocorre nas contas OpenAI/Anthropic (a AI Gateway é passthrough); Cloudflare pode não expor limite de gasto nativo | Ver "Riscos e incertezas". Se existir endpoint Cloudflare equivalente, tratar como API, não Terraform. |
-| Payload logging / Zero Data Retention no AI Gateway | Cloudflare API (leitura da configuração do gateway) | Confirma que `cf-aig-collect-log-payload` está desativado e que não há retenção de prompts/respostas. |
-| Cloudflare Access / proteção administrativa | **Ação humana + evidência** (ver seção dedicada) | O staging usa domínio `workers.dev`, que pertence à zona da própria Cloudflare — Access self-hosted não pode proteger esse hostname sem antes anexar um domínio próprio, o que está fora do escopo atual. |
+| AI Gateway Read | **Sim** | Auditoria pré/pós-apply lê a configuração do gateway (`GET .../ai-gateway/gateways/{id}`); leitura também ocorre antes do PUT para preservar campos existentes. |
+| AI Gateway Write | **Sim** | `scripts/cloudflare-ai-gateway-configure.mjs` grava o rate limit (`PUT .../ai-gateway/gateways/{id}`). |
+| Workers Scripts Write | **Sim** | Listagem de nomes de secret (`GET .../workers/scripts/{name}/secrets`) e `wrangler secret put KARV_INTERNAL_API_TOKEN --env staging`. |
+| Access: Apps and Policies Write | **Não** | Cloudflare Access não é implementado nesta fase (ver "Bloqueios administrativos" abaixo). **Remover esta permissão do token** até uma decisão futura reintroduzir Access. |
+| Notifications Write | **Não** | Spend limit e alerta de custo não são implementados nesta fase (ver abaixo). **Remover esta permissão do token.** |
 
-## Cloudflare Access — limitação identificada
+Recomendação final de escopo do `CLOUDFLARE_ADMIN_API_TOKEN`: apenas **AI Gateway Read**,
+**AI Gateway Write** e **Workers Scripts Write**, restrito à conta KARV. Sem
+**Workers Scripts: Edit de código-fonte** (não há deploy neste workflow), sem **DNS**, sem
+**Billing**.
 
-`wrangler.jsonc` define `env.staging` com `workers_dev: true` e sem `routes` em zona própria.
-Cloudflare Access (self-hosted application) protege hostnames em zonas que a conta possui;
-`*.workers.dev` é uma zona da própria Cloudflare e não pode receber uma Access Application do
-cliente. Portanto "Cloudflare Access ou proteção administrativa equivalente" não pode ser
-implementado como um gate de SSO na frente do tráfego HTTP sem primeiro anexar um domínio
-próprio ao Worker de staging — o que é uma mudança de infraestrutura maior, não solicitada
-neste momento.
+## O que o workflow implementa de fato
 
-**Proposta (proteção administrativa equivalente):** controlar quem pode **gerenciar** o recurso
-no Cloudflare (dashboard/API), não quem pode chamar o Worker:
+Dois jobs em `.github/workflows/harden-staging.yml`:
 
-1. Evidência dos membros da conta Cloudflare com acesso de escrita (via API, somente leitura),
-   comparado com a lista de pessoas autorizadas pela decisão A.
-2. Confirmação de que o único endpoint sensível (`/api/internal/ai`) já exige bearer token
-   (`requireInternalAuth`) e permanece com `AI_API_ENABLED=false` — ou seja, tráfego não
-   autenticado já é bloqueado independentemente de Access.
-3. Se a direção KARV decidir que é necessário Access de fato (SSO na frente do tráfego), isso
-   fica registrado como bloqueio documentado nesta fase, exigindo uma decisão separada sobre
-   anexar domínio próprio ao staging.
+1. **`plan`** (Environment `staging`, somente leitura):
+   - Confirma a string literal `HARDEN-STAGING`.
+   - Confirma que as três feature flags críticas continuam `false` em `wrangler.jsonc`.
+   - Executa `scripts/cloudflare-admin-audit.mjs` em modo `pre`: relata a presença/ausência do
+     secret `KARV_INTERNAL_API_TOKEN` no Worker e o estado atual do rate limit e do
+     `collect_logs` do AI Gateway staging. **Não falha** só porque o secret ainda não existe ou
+     o rate limit ainda não foi configurado — esse é exatamente o estado inicial esperado antes
+     do apply. Falha somente se a própria chamada à API Cloudflare falhar (token insuficiente,
+     rede, etc.), porque nesse caso não há como confirmar nada.
+   - Publica o relatório sanitizado no Job Summary.
 
-Esta proposta evita inventar uma configuração que a topologia atual não suporta. Se a decisão
-A/E indicar outra expectativa, este plano precisa ser revisado antes da Fase C.
+2. **`apply`** (Environment `staging-admin-hardening-apply`, com required reviewer):
+   - Confirma presença de todos os secrets/variables exigidos (falha com mensagem clara se
+     faltar algum, sem presumir).
+   - Confirma de novo que as três feature flags críticas continuam `false`.
+   - `wrangler secret put KARV_INTERNAL_API_TOKEN --env staging`, com o valor lido do GitHub
+     Secret via variável de ambiente e nunca impresso (`printf '%s' "$TOKEN" | wrangler secret put ...`).
+   - `scripts/cloudflare-ai-gateway-configure.mjs`: lê a configuração atual do AI Gateway
+     staging, sobrepõe somente `rate_limiting_limit`, `rate_limiting_interval` e
+     `rate_limiting_technique` (fixo em `sliding`, decisão de implementação, não de negócio) e
+     grava de volta — preservando os demais campos, incluindo `collect_logs`. Confirma por
+     leitura pós-escrita que os valores gravados correspondem ao solicitado; se não
+     corresponderem (por exemplo, por divergência no nome real do campo na API), falha com
+     erro explícito em vez de reportar sucesso indevido.
+   - `scripts/cloudflare-admin-audit.mjs` em modo `post`: **estrito**. Falha se o secret
+     continuar ausente, se o rate limit não corresponder ao valor solicitado, ou se
+     `collect_logs` estiver `true`.
+   - Health check remoto (`GET /health` em `STAGING_HEALTH_URL`, espera `200`).
+   - Confirma novamente que as três feature flags críticas continuam `false`.
 
-## Rate limit do AI Gateway
+Nenhum passo em nenhum dos dois jobs referencia o Worker de produção (`karv-cloud-platform`)
+ou `env.production`.
 
-Nenhum valor é definido neste plano — conforme instrução explícita, nenhum número foi
-inventado. O workflow de hardening (`harden-staging.yml`) recebe a quantidade de requisições e
-a janela como **inputs obrigatórios de `workflow_dispatch`**, decididos no momento do disparo
-pela direção KARV. O valor final aparece no `terraform plan` sanitizado antes de qualquer
-`apply`.
+## Mitigação da incerteza de schema da API do AI Gateway
 
-## Spend limit / orçamento
+Os nomes de campo usados (`collect_logs`, `rate_limiting_limit`, `rate_limiting_interval`,
+`rate_limiting_technique`) refletem o melhor entendimento atual da API pública de AI Gateway.
+Como não há `terraform validate` para pegar um nome de campo errado antes da execução, a
+mitigação é: o script sempre lê antes de escrever, sempre lê de novo depois de escrever, e
+compara o valor lido com o valor solicitado byte a byte — se a API ignorar um campo
+desconhecido ou usar outro nome, a leitura pós-escrita não vai corresponder e o job falha
+imediatamente, em vez de reportar sucesso incorretamente. Nenhuma mutação incorreta fica
+"encoberta" por uma auditoria otimista.
 
-Mesma lógica: nenhum valor nem período foi definido aqui. Ver "Riscos e incertezas" — é preciso
-confirmar primeiro se este controle existe nativamente no Cloudflare AI Gateway/conta, ou se
-pertence às contas OpenAI/Anthropic. Enquanto não confirmado, o workflow trata este item como
-**não comprovável via Cloudflare** e o relatório final listará isso explicitamente como bloqueio,
-a menos que a direção KARV informe o mecanismo correto.
+## Bloqueios administrativos registrados, não implementados nesta fase
 
-## Destinatário do alerta de custo
+Estes controles **não têm implementação nem validação real** neste workflow e não devem ser
+declarados concluídos na issue #18 até que isso mude:
 
-Não definido neste plano. Será um input do workflow (e-mail ou webhook), fornecido no momento
-do disparo, nunca hardcoded no código ou no Terraform.
+- **Cloudflare Access / proteção administrativa equivalente**: o staging usa domínio
+  `workers.dev`, que pertence à zona da própria Cloudflare — uma Access Application self-hosted
+  não pode proteger esse hostname sem antes anexar um domínio próprio ao Worker, o que é uma
+  mudança de infraestrutura maior, fora deste escopo. Requer decisão humana separada.
+- **Spend limit / orçamento**: não confirmado se a Cloudflare AI Gateway ou a conta Cloudflare
+  expõe um limite de gasto nativo via API. O gasto real de tokens de IA ocorre nas contas
+  OpenAI/Anthropic (a AI Gateway é passthrough), então este controle pode pertencer a essas
+  contas, fora do Cloudflare.
+- **Alerta de custo e seu destinatário**: sem implementação; depende do item anterior.
+- **Lista de administradores autorizados (quem pode gerenciar o staging)**: sem automação;
+  precisa ser verificada manualmente nos membros da conta Cloudflare (Account Members) e
+  comparada com a decisão da direção KARV sobre quem deve ter acesso.
+- **Login humano vs. Service Auth**: não decidido; não há Access implementado para aplicar essa
+  escolha.
 
-## Login humano vs. Service Auth
-
-Não decidido neste plano. Um input de `workflow_dispatch` (`access_auth_method`, com opções
-`human_login` / `service_token` / `both`) documenta a escolha no momento da execução, sem
-presumir um padrão.
+Estes cinco itens entram na lista de "controles que não puderam ser comprovados" no relatório
+final e no comentário da issue #18 — não serão apresentados como resolvidos.
 
 ## Armazenamento seguro dos secrets
 
-- Nenhum novo secret é criado por este plano. `KARV_INTERNAL_API_TOKEN` já existe como
-  GitHub Environment secret e (presumivelmente) como Worker secret em staging — sua existência
-  no Worker será confirmada por leitura de nomes, nunca de valores.
-- Nenhum token, client id ou client secret é escrito em arquivos `.tf`, `terraform.tfvars`
-  versionado, logs de CI ou nesta issue/PR.
-- Caso a Fase C precise de um novo token de serviço (ex.: para Access), ele será criado como
-  Cloudflare Access Service Token e armazenado apenas como GitHub Secret — nunca em
-  `terraform.tfvars` versionado nem exposto em `terraform plan`. Se o provider Terraform
-  gravar esse valor no state, o recurso correspondente **não será criado via Terraform**, e sim
-  via API/Wrangler fora do state, conforme regra explícita do projeto.
-
-## Backend remoto do Terraform
-
-Não existe backend remoto hoje (Fase A confirmou: nenhum arquivo `.tf` no repositório). Duas
-opções ficam propostas para decisão, nenhuma aplicada ainda:
-
-1. **Terraform Cloud (app.terraform.io)** — workspace dedicado, execução remota opcional,
-   state com lock nativo, sem credenciais Cloudflare adicionais. Requer criar uma organização/
-   workspace e um `TF_API_TOKEN` como novo GitHub Secret.
-2. **Cloudflare R2 (S3-compatible) como backend `s3`** — mantém o state dentro da própria conta
-   Cloudflare, mas exige criar um bucket R2 e credenciais S3-compatíveis (Access Key/Secret),
-   que também precisariam virar GitHub Secrets novos.
-
-Ambas as opções exigem uma mutação (criar workspace ou criar bucket) antes do primeiro
-`terraform init`. Nenhuma será executada sem autorização explícita e escolha entre as duas.
+- Nenhum novo secret é criado por este plano. `KARV_INTERNAL_API_TOKEN` já existe como GitHub
+  Environment secret; este workflow apenas o copia para o Worker staging via `wrangler secret
+  put`, sem gravá-lo em nenhum arquivo do repositório, log de CI, artifact ou state.
+- Sem Terraform, não há state a proteger.
+- Nenhum token, client id ou client secret é escrito em `wrangler.jsonc`, código, logs ou nesta
+  issue/PR.
 
 ## Rollback por alteração
 
 | Alteração | Rollback |
 | --- | --- |
-| Rate limit do AI Gateway | Reverter para o valor anterior via `terraform apply` do estado anterior, ou remover o bloco de rate limit e reaplicar. |
-| Configuração de payload logging/ZDR | Reverter o campo correspondente para o valor original documentado antes da mudança. |
-| Access/IAM (se decidido) | Remover a policy/application criada; nenhuma alteração em produção; staging sem Access equivale ao estado atual (bearer token continua sendo o gate funcional). |
-| Workflow `harden-staging.yml` | Arquivo apenas adicionado; reverter é excluir o arquivo em um PR separado. |
+| Secret `KARV_INTERNAL_API_TOKEN` no Worker staging | `wrangler secret delete KARV_INTERNAL_API_TOKEN --env staging`, ou substituir pelo valor anterior se a rotação documentada em `docs/staging-security.md` estiver em andamento. |
+| Rate limit do AI Gateway staging | Rodar `scripts/cloudflare-ai-gateway-configure.mjs` novamente com os valores anteriores, capturados no relatório da auditoria pré-apply (job `plan`). |
+| Workflow `harden-staging.yml` e scripts | Apenas arquivos adicionados; reverter é excluí-los em um PR separado. |
 
-Todo `apply` só ocorre em um job separado, gated por aprovação humana no GitHub Environment,
-nunca automático.
+Todo `apply` só ocorre em um job separado, gated por aprovação humana no GitHub Environment
+`staging-admin-hardening-apply`, nunca automático.
 
 ## Testes de validação
 
-- `terraform fmt -check`, `terraform validate`, `terraform plan` (sem apply) no job de plan.
-- Leitura pós-apply (job separado, também manual) confirmando por API: nomes de secrets
-  presentes, configuração de rate limit do AI Gateway, configuração de payload logging.
-- `GET /health` do staging continua respondendo `200` (Worker saudável, sem regressão).
-- Confirmação de que `AI_API_ENABLED`, `REPORTING_API_ENABLED` e `REPORT_DELIVERY_ENABLED`
-  continuam `false` em `wrangler.jsonc` (diff de texto, não runtime).
-- Confirmação de que nenhum arquivo sob `env.production` foi tocado.
-
-## Arquivos a adicionar nesta PR (Fase B, sem mutação Cloudflare)
-
-- `docs/phase2-cloudflare-admin-hardening-plan.md` (este arquivo).
-- `.github/workflows/harden-staging.yml` (workflow manual, plan-only até aprovação separada
-  para apply).
-- `scripts/cloudflare-admin-audit.mjs` (auditoria somente leitura: confirma nomes de secret
-  sem ler valores; falha se não puder confirmar em vez de presumir).
-- `terraform/versions.tf`, `terraform/variables.tf`, `terraform/main.tf`, `terraform/outputs.tf`
-  (esqueleto; recurso do AI Gateway usa bloco `import` para trazer o gateway já existente ao
-  state em vez de recriá-lo).
-- `terraform/backend.hcl.example` (modelo não secreto; `terraform/backend.hcl` real fica
-  ignorado pelo Git e só é criado após a decisão do backend remoto).
-- `.gitignore` atualizado para ignorar `terraform/.terraform/`, `terraform/*.tfstate*`,
-  `terraform/backend.hcl` e `terraform/tfplan.bin`.
-
-O job de plan em `harden-staging.yml` falha explicitamente em "Require provisioned remote
-backend" se `terraform/backend.hcl` não existir — isso é intencional: sem essa decisão tomada,
-o workflow não deve cair em backend local dentro do runner efêmero do GitHub Actions.
+- Auditoria pré-apply (modo `pre`) publicada no Job Summary do job `plan`.
+- Auditoria pós-apply (modo `post`, estrita) publicada no Job Summary do job `apply` — falha o
+  job se qualquer controle não for confirmado.
+- Leitura pós-escrita do rate limit do AI Gateway, comparada byte a byte com o valor solicitado.
+- `GET /health` do staging responde `200` depois do apply.
+- Confirmação textual de que `AI_API_ENABLED`, `REPORTING_API_ENABLED` e
+  `REPORT_DELIVERY_ENABLED` continuam `false` em `wrangler.jsonc`, antes e depois do apply.
+- Nenhuma chamada do workflow referencia `karv-cloud-platform` (produção) ou `env.production`.
 
 ## Configuração manual necessária no GitHub antes do primeiro disparo
 
-Nenhuma destas ações é feita por este PR — são pré-requisitos para o workflow funcionar,
-listados aqui para transparência:
+Nenhuma destas ações é feita por este PR — são pré-requisitos para o workflow funcionar:
 
 - Criar o Environment `staging-admin-hardening-apply` em **Settings → Environments**, com
-  "required reviewers" configurado (pelo menos uma pessoa da direção KARV). Sem isso, o job de
-  apply falha ao iniciar por falta de ambiente, em vez de aplicar sem aprovação.
-- Adicionar a variable `STAGING_HEALTH_URL` (não secreta) ao Environment `staging`, com a URL
-  pública de `/health` do Worker staging, usada apenas para validação remota pós-apply.
-- Criar `terraform/backend.hcl` localmente (fora do Git) somente após a decisão do backend
-  remoto, seguindo `terraform/backend.hcl.example`.
+  "required reviewers" (pelo menos uma pessoa da direção KARV) e os secrets/variables listados
+  na seção "Credenciais disponíveis".
+- Confirmar que o Environment `staging` já tem `CLOUDFLARE_ADMIN_API_TOKEN` (secret) e
+  `CLOUDFLARE_ACCOUNT_ID` (variable) — usados pelo job `plan`.
 
-## Riscos e incertezas — controles que podem não ser comprováveis via Cloudflare
+## Arquivos desta PR
 
-- **Spend limit/orçamento**: não há confirmação de que a Cloudflare AI Gateway ou a conta
-  Cloudflare exponha um limite de gasto nativo via API/Terraform. Pode ser um controle que
-  pertence às contas OpenAI/Anthropic, fora do Cloudflare. Isso será verificado no início da
-  Fase C (chamada de leitura à API, sem mutação) e reportado como bloqueio se não existir.
-- **Rate limit do AI Gateway via Terraform**: o provider Cloudflare pode não expor os campos de
-  rate limit do AI Gateway como atributos do recurso `cloudflare_ai_gateway`. Será confirmado em
-  `terraform validate`/documentação do provider na versão fixada; se não suportado, o controle
-  será implementado via chamada direta à API do AI Gateway dentro do workflow, documentado como
-  tal (não Terraform).
-- **Cloudflare Access em `workers.dev`**: confirmado como não suportado diretamente (ver seção
-  dedicada). Requer decisão humana adicional se a direção KARV insistir nesse controle
-  específico.
+- `docs/phase2-cloudflare-admin-hardening-plan.md` (este arquivo).
+- `.github/workflows/harden-staging.yml` — workflow manual com dois jobs (`plan` somente
+  leitura, `apply` com aprovação humana separada).
+- `scripts/cloudflare-admin-audit.mjs` — auditoria pré/pós-apply (modos `pre`/`post`).
+- `scripts/cloudflare-ai-gateway-configure.mjs` — grava o rate limit do AI Gateway staging via
+  API Cloudflare, com leitura de confirmação.
 
-## Decisões ainda pendentes (inputs do workflow, não valores fixos no código)
+Nenhum arquivo Terraform faz parte desta PR.
 
-- Lista de e-mails/domínios autorizados a administrar o staging (decisão A).
-- Quantidade de requisições e janela do rate limit do AI Gateway (decisão B).
-- Valor e período do spend limit, condicionado à confirmação de que o controle existe (decisão C).
-- Destinatário do alerta de custo (decisão D).
-- Login humano, Service Auth ou ambos para administração (decisão E).
-- Escolha do backend remoto Terraform (Terraform Cloud ou R2).
+## Decisões ainda pendentes
 
-Nenhuma dessas decisões foi presumida. O workflow em `harden-staging.yml` exige esses valores
-como entrada explícita no momento do disparo manual.
+- Quantidade de requisições e janela do rate limit do AI Gateway (decisão B) — inputs
+  obrigatórios do workflow, sem valor fixado no código.
+- Quem administra o staging, spend limit, destinatário de alerta e método de autenticação
+  administrativa (decisões A, C, D, E) — registrados como bloqueios administrativos não
+  implementados nesta fase (ver seção dedicada), não como inputs do workflow, porque não há
+  implementação real para consumi-los.
