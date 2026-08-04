@@ -11,6 +11,7 @@ const REQUIRED_SECRET_NAMES = ["KARV_INTERNAL_API_TOKEN"];
 const MANAGED_SPEND_LIMIT_RULE_ID = "karv-staging-global-budget";
 const EXPECTED_RATE_LIMITING_TECHNIQUE = "sliding";
 const EXPECTED_SPEND_LIMIT_TECHNIQUE = "fixed";
+const REQUEST_TIMEOUT_MS = 30_000;
 
 const mode = requireEnv("AUDIT_MODE");
 if (mode !== "pre" && mode !== "post") {
@@ -110,10 +111,16 @@ if (mode === "pre" && hasBlocker) {
 
 async function auditWorkerSecrets() {
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${WORKER_NAME}/secrets`;
-  const body = await cloudflareGet(url, "Workers Scripts");
+  const body = await cloudflareGet(url, "Workers Scripts Read");
   if (!body) return;
 
-  const names = new Set((body.result ?? []).map((secret) => secret.name));
+  if (!Array.isArray(body.result)) {
+    findings.push("[falha-api] A API de Workers não retornou uma lista de secrets.");
+    hasApiFailure = true;
+    return;
+  }
+
+  const names = new Set(body.result.map((secret) => secret?.name).filter(Boolean));
   for (const secretName of REQUIRED_SECRET_NAMES) {
     if (names.has(secretName)) {
       findings.push(`[ok] Secret "${secretName}" está presente no Worker ${WORKER_NAME}.`);
@@ -129,15 +136,56 @@ async function auditWorkerSecrets() {
 
 async function auditAiGateway() {
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${AI_GATEWAY_ID}`;
-  const body = await cloudflareGet(url, "AI Gateway");
+  const body = await cloudflareGet(url, "AI Gateway Read");
   if (!body) return null;
 
   const gateway = body.result;
+  if (!isPlainObject(gateway) || gateway.id !== AI_GATEWAY_ID) {
+    findings.push(
+      `[falha-api] Gateway retornado é ${JSON.stringify(gateway?.id)}, esperado ${AI_GATEWAY_ID}.`
+    );
+    hasApiFailure = true;
+    return null;
+  }
+
+  auditSensitivePreservationConstraints(gateway);
   auditCollectLogs(gateway);
   auditZdr(gateway);
   auditRateLimit(gateway);
   auditSpendLimit(gateway);
   return gateway;
+}
+
+function auditSensitivePreservationConstraints(gateway) {
+  if (gateway.stripe != null) {
+    findings.push(
+      "[bloqueio] O gateway possui configuração Stripe; o PUT administrativo não pode preservá-la com segurança por leitura-escrita."
+    );
+    hasBlocker = true;
+  }
+
+  const otelEntries = gateway.otel;
+  if (otelEntries != null && !Array.isArray(otelEntries)) {
+    findings.push("[bloqueio] O campo otel retornado pela API não é uma lista.");
+    hasBlocker = true;
+    return;
+  }
+
+  if (
+    Array.isArray(otelEntries) &&
+    otelEntries.some(
+      (entry) =>
+        entry &&
+        Object.prototype.hasOwnProperty.call(entry, "authorization") &&
+        entry.authorization != null &&
+        entry.authorization !== ""
+    )
+  ) {
+    findings.push(
+      "[bloqueio] O gateway possui OpenTelemetry com authorization; o PUT administrativo não pode reenviar essa credencial com segurança."
+    );
+    hasBlocker = true;
+  }
 }
 
 function auditCollectLogs(gateway) {
@@ -261,14 +309,24 @@ function formatManagedSpendLimit(spendLimits) {
 }
 
 async function cloudflareGet(url, permissionLabel) {
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${apiToken}`,
-      "Content-Type": "application/json"
-    }
-  });
-  const body = await response.json().catch(() => null);
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        "Content-Type": "application/json"
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+    });
+  } catch (error) {
+    findings.push(
+      `[falha-api] Consulta a ${new URL(url).pathname} falhou antes de receber resposta: ${error?.message ?? error}.`
+    );
+    hasApiFailure = true;
+    return null;
+  }
 
+  const body = await response.json().catch(() => null);
   if (!response.ok || !body?.success) {
     findings.push(
       `[falha-api] Consulta a ${new URL(url).pathname} falhou com HTTP ${response.status}. Verifique a permissão "${permissionLabel}".`
@@ -299,6 +357,10 @@ function requireEnv(name) {
   const value = process.env[name];
   if (!value) fail(`Variável obrigatória ausente: ${name}`);
   return value;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function fail(message) {
