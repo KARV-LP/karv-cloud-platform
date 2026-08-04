@@ -2,84 +2,70 @@
 
 ## Objetivo
 
-Definir os valores iniciais e o protocolo seguro para executar o hardening administrativo do
-staging após o merge da PR #23, sem ativar IA, reporting ou delivery e sem tocar em produção.
+Definir os valores e o protocolo seguro para concluir o hardening administrativo do staging após o
+merge da PR #23, sem ativar IA, reporting ou report delivery e sem tocar em produção.
 
-Esta etapa prepara a operação. Ela não cria secrets, não altera a conta Cloudflare e não executa o
-workflow administrativo.
-
-## Decisões adotadas para staging
+## Baseline do staging
 
 ### Rate limit do AI Gateway
-
-Baseline inicial:
 
 - limite: `10` requisições;
 - janela: `60` segundos;
 - técnica: `sliding`.
 
-Essa baseline replica o limite já usado no binding do Worker e mantém duas camadas independentes de
-proteção. Os valores são defaults do workflow, mas permanecem visíveis e editáveis antes de cada
-execução.
+Os valores permanecem visíveis e editáveis no formulário do workflow, mas a execução prevista para
+a issue #18 usa exatamente `10/60`.
 
 ### Spend limit
 
-Baseline proposta:
-
 - orçamento global: `USD 5`;
-- janela de negócio: diária;
+- janela: `86400` segundos (`24` horas);
 - técnica: `fixed`;
-- comportamento ao atingir o limite: bloquear com HTTP `429`.
+- comportamento ao atingir o limite: bloqueio com HTTP `429`.
 
-A documentação funcional da Cloudflare descreve janelas diárias, semanais e mensais, mas o schema
-da API publica `spend_limits.rules[].window` apenas como inteiro positivo e não documenta sua
-unidade. Portanto:
+A Cloudflare documenta `window` como uma janela de tempo em segundos nos controles de rate/budget
+limit. Portanto, a janela diária adotada é:
 
-1. o primeiro `plan` deve manter `amount` e `window` vazios;
-2. a janela diária deve ser criada ou inspecionada no painel Cloudflare;
-3. o valor numérico real retornado pela API deve ser registrado;
-4. somente depois o workflow pode receber `amount=5` e o `window` confirmado.
+```text
+24 × 60 × 60 = 86400 segundos
+```
 
-O workflow não converte `daily` para um número por suposição.
+O workflow rejeita qualquer valor diferente de `86400` quando um spend limit é solicitado.
 
 Referências:
 
 - https://developers.cloudflare.com/ai-gateway/features/spend-limits/
+- https://developers.cloudflare.com/ai-gateway/features/dynamic-routing/json-configuration/
 - https://developers.cloudflare.com/api/resources/ai_gateway/methods/update/
 
-### Alerta de custo
+### Alerta de custo da conta
 
-Criar um alerta de orçamento da conta com:
+O alerta proposto de `USD 10` por ciclo não será criado por decisão explícita do operador em
+`2026-08-04`.
 
-- nome: `KARV staging usage warning`;
-- threshold inicial: `USD 10` no ciclo de cobrança;
-- destinatário: `comercial@k-arv.com`.
+Consequência aceita:
 
-O alerta de orçamento é informativo e considera o gasto usage-based da conta; ele não substitui o
-spend limit do AI Gateway e não interrompe uso.
+- não haverá aviso informativo por e-mail quando o gasto da conta se aproximar de `USD 10`;
+- o spend limit de `USD 5/24h` do AI Gateway continua sendo o mecanismo técnico de bloqueio;
+- a dispensa deve ser registrada como exceção operacional na issue #18.
 
-Referência:
-
-- https://developers.cloudflare.com/billing/manage/budget-alerts/
+Essa dispensa não pode ser registrada como “alerta configurado”.
 
 ## Separação obrigatória entre plan e apply
 
-O workflow passa a ter o input `execution_mode`:
+O workflow usa o input `execution_mode`:
 
-- `plan` — padrão; executa somente leituras e gera o Job Summary;
-- `apply` — executa o mesmo plan e, somente depois, agenda o job protegido de mutação.
+- `plan` — somente leitura; gera o Job Summary e não agenda mutação;
+- `apply` — executa primeiro o plan e depois agenda o job protegido.
 
 Confirmações literais:
 
 - `PLAN-STAGING` para `plan`;
 - `APPLY-STAGING` para `apply`.
 
-Selecionar `plan` faz o job `apply` ser ignorado. Selecionar `apply` ainda exige aprovação do
-Environment `staging-admin-hardening-apply`.
+Nenhum apply pode ocorrer antes de um plan real aprovado.
 
 ## GitHub Environments
-
-O repositório é público, portanto required reviewers podem ser usados no Environment.
 
 ### `staging`
 
@@ -93,32 +79,37 @@ Secret:
 
 - `CLOUDFLARE_AUDIT_API_TOKEN`.
 
-Permissões mínimas do token:
+Permissões mínimas:
 
 - AI Gateway Read;
 - Workers Scripts Read.
 
-Não cadastrar token de escrita neste Environment.
+O secret legado `CLOUDFLARE_API_TOKEN` permanece temporariamente presente e não deve ser removido
+sem validação posterior.
 
 ### `staging-admin-hardening-apply`
 
 Uso: mutação administrativa explicitamente aprovada.
 
-Proteções:
+Proteções configuradas:
 
-- required reviewer configurado;
+- required reviewer: `kv-manager`;
 - `Prevent self-review` habilitado;
-- somente branch `main`;
-- nenhum bypass operacional normal.
+- wait timer desabilitado;
+- bypass de administradores desabilitado;
+- somente a branch `main` pode usar o Environment;
+- nenhuma tag autorizada.
 
-Como o iniciador não pode aprovar a própria execução, é necessário um segundo GitHub user com
-acesso de leitura ao repositório. O apply não deve ser executado enquanto esse revisor independente
-não existir.
+Exceção temporária:
+
+`kv-manager` é uma conta GitHub distinta, mas está sob controle do mesmo operador. O gate técnico
+funciona e impede self-review pela mesma conta que iniciou a execução, porém não representa revisão
+humana independente plena. A issue #18 deve registrar essa limitação sem declarar independência.
 
 Variáveis:
 
 - `CLOUDFLARE_ACCOUNT_ID`;
-- `STAGING_HEALTH_URL`, incluindo `/health` e usando HTTPS.
+- `STAGING_HEALTH_URL`, com HTTPS e caminho `/health`.
 
 Secrets:
 
@@ -133,41 +124,30 @@ Permissões mínimas do token administrativo:
 - AI Gateway Write;
 - Workers Scripts Write.
 
-## Cloudflare Access no Worker de staging
+## Cloudflare Access
 
-O Worker em `workers.dev` pode ser protegido diretamente pelo Cloudflare Access. Não é necessário
-migrar primeiro para um domínio próprio.
+O Worker `karv-cloud-platform-staging` está protegido diretamente em `workers.dev`.
 
-Procedimento administrativo:
+Configuração validada:
 
-1. abrir Workers & Pages;
-2. selecionar `karv-cloud-platform-staging`;
-3. abrir Domains ou Settings > Domains & Routes;
-4. habilitar Cloudflare Access para a URL `workers.dev`;
-5. manter política deny-by-default;
-6. criar uma política humana Allow apenas para administradores autorizados;
-7. criar um Service Token exclusivo chamado `karv-staging-github-actions`;
-8. adicionar uma política `Service Auth` para esse token;
-9. armazenar Client ID e Client Secret somente no Environment protegido do apply.
+- aplicação Self-hosted para o Worker de staging;
+- política humana `Allow` limitada a `commercial.karv.sp@gmail.com`;
+- Service Token `karv-staging-github-actions`;
+- política `Service Auth` vinculada;
+- Client ID e Client Secret armazenados somente no Environment protegido.
 
-O health check do workflow envia os headers:
+O health check envia:
 
 - `CF-Access-Client-Id`;
 - `CF-Access-Client-Secret`.
 
-Sem os dois secrets, o apply falha antes da mutação.
-
-Referências:
-
-- https://developers.cloudflare.com/workers/configuration/routing/workers-dev/
-- https://developers.cloudflare.com/cloudflare-one/access-controls/applications/choose-application-type/
-- https://developers.cloudflare.com/workers/local-development/
+O `curl` do health check não segue redirects. Isso impede que os headers personalizados do Service
+Token sejam reenviados para outro destino. Qualquer resposta diferente de `200` encerra o job com
+falha.
 
 ## Sequência operacional depois do merge
 
 ### Execução 1 — plan sem spend limit
-
-Inputs:
 
 ```text
 execution_mode=plan
@@ -178,12 +158,10 @@ ai_gateway_spend_limit_amount=
 ai_gateway_spend_limit_window=
 ```
 
-Objetivo: confirmar leitura da conta, estado do secret, logging, ZDR, rate limit e configuração de
-spend limits sem mutação.
+Objetivo: ler o estado real do Worker e do AI Gateway sem mutação e confirmar o conteúdo sanitizado
+do Job Summary.
 
-### Execução 2 — plan com orçamento confirmado
-
-Executar somente depois de confirmar o número usado pela API para a janela diária:
+### Execução 2 — plan com spend limit
 
 ```text
 execution_mode=plan
@@ -191,51 +169,63 @@ confirmation=PLAN-STAGING
 ai_gateway_rate_limit_requests=10
 ai_gateway_rate_limit_period_seconds=60
 ai_gateway_spend_limit_amount=5
-ai_gateway_spend_limit_window=<valor confirmado>
+ai_gateway_spend_limit_window=86400
 ```
 
-Objetivo: revisar no Job Summary o estado atual e a proposta completa.
+Objetivo: revisar a proposta completa antes de qualquer escrita.
 
-### Execução 3 — apply aprovado
+### Execução 3 — apply protegido
 
-Repetir os mesmos valores da Execução 2 com:
+Usar os mesmos valores da Execução 2, alterando somente:
 
 ```text
 execution_mode=apply
 confirmation=APPLY-STAGING
 ```
 
-O job de apply deve aguardar o revisor independente. Após aprovação, ele cadastra o Worker secret,
-configura o AI Gateway, executa auditoria pós-escrita e testa `/health` através do Access.
+O job deve aguardar a aprovação no Environment. A aprovação é um gate técnico entre contas, com a
+exceção de independência operacional descrita acima.
+
+Após a aprovação, o workflow:
+
+1. cadastra `KARV_INTERNAL_API_TOKEN` no Worker de staging;
+2. configura rate limit, `collect_logs=false`, `zdr=true` e spend limit;
+3. executa auditoria pós-escrita estrita;
+4. testa `/health` através do Cloudflare Access;
+5. confirma que produção e feature flags críticas permaneceram intactas.
 
 ## Evidências permitidas
 
-Registrar na issue #18 apenas:
+Registrar na issue #18 somente:
 
-- IDs de runs;
-- conclusões dos jobs;
+- IDs e conclusões dos runs;
 - presença ou ausência de secrets por nome;
-- valores não sensíveis de rate limit e spend limit;
+- rate limit `10/60` e técnica;
+- spend limit `USD 5`, `window=86400` e técnica `fixed`;
 - `collect_logs=false`;
 - `zdr=true`;
 - HTTP status do health check;
 - confirmação de Access ativo;
-- nome do alerta e threshold;
-- lista de administradores por login, sem credenciais.
+- e-mail humano autorizado;
+- dispensa explícita do Budget Alert;
+- exceção temporária de revisão não independente.
 
-Nunca registrar tokens, Client Secret, headers de autenticação, prompts ou respostas.
+Nunca registrar tokens, Client Secret, valores de headers ou qualquer credencial.
 
-## Bloqueios administrativos que permanecem manuais
+## Critério de encerramento da issue #18
 
-A integração disponível não permite:
+A issue só pode ser encerrada depois de evidência real de:
 
-- criar ou editar GitHub Environments;
-- cadastrar environment secrets;
-- criar tokens Cloudflare;
-- habilitar Access no painel;
-- criar Service Tokens;
-- criar alertas de orçamento;
-- revisar membros administradores da conta Cloudflare.
-
-Esses itens devem ser executados no painel por uma pessoa autorizada. O código permanece
-fail-closed até que todos estejam configurados e comprovados.
+1. plan sem spend limit executado e revisado;
+2. plan com `USD 5/86400` executado e revisado;
+3. apply executado após aprovação do Environment;
+4. secret interno presente;
+5. rate limit `10/60` confirmado;
+6. `collect_logs=false`;
+7. `zdr=true`;
+8. spend limit confirmado;
+9. `/health` retornando `200` via Access;
+10. IA, reporting e delivery desativados;
+11. produção não alterada;
+12. Budget Alert registrado como dispensado, não como configurado;
+13. exceção de revisão sob o mesmo operador registrada explicitamente.
