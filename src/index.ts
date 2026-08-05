@@ -1,6 +1,7 @@
 import { runAnthropic } from "./providers/anthropic";
 import { ProviderError } from "./providers/common";
 import { runOpenAi } from "./providers/openai";
+import { getPublicKarvProject } from "./projects";
 import {
   deliverReport,
   parseReportPeriod,
@@ -30,6 +31,25 @@ export default {
         { status: "ok", service: "karv-cloud-platform", requestId },
         200
       );
+    }
+
+    const projectPathPrefix = "/api/projects/";
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith(projectPathPrefix)
+    ) {
+      try {
+        requireAllowedBrowserOrigin(request, env);
+        const projectId = url.pathname.slice(projectPathPrefix.length);
+        const project = getPublicKarvProject(projectId);
+        if (!project) throw new HttpError(404, "KARV project not found");
+        return json(project, 200, corsHeaders(request, env));
+      } catch (error) {
+        if (error instanceof HttpError) {
+          return json({ error: error.message, requestId }, error.status);
+        }
+        return json({ error: "Internal server error", requestId }, 500);
+      }
     }
 
     if (

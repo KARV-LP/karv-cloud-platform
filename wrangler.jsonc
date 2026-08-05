@@ -17,7 +17,7 @@
   "vars": {
     "AI_API_ENABLED": "false",
     "AI_GATEWAY_BASE_URL": "",
-    "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com",
+    "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com,https://kv-collab-bling.k-arv.com",
     "KARV_DEFAULT_PROJECT": "karv-lps",
     "KARV_PROJECTS": "karv-lps,KV_COLLAB_BLING,3D,karv-cloud-platform",
     "OPENAI_MODEL": "gpt-5.6-terra",
@@ -92,7 +92,7 @@
       "vars": {
         "AI_API_ENABLED": "false",
         "AI_GATEWAY_BASE_URL": "",
-        "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com",
+        "ALLOWED_ORIGINS": "https://k-arv.com,https://www.k-arv.com,https://kv-collab-bling.k-arv.com",
         "KARV_DEFAULT_PROJECT": "karv-lps",
         "KARV_PROJECTS": "karv-lps,KV_COLLAB_BLING,3D,karv-cloud-platform",
         "OPENAI_MODEL": "gpt-5.6-terra",
